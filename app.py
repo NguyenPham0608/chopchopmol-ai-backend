@@ -485,6 +485,8 @@ ALL AVAILABLE FUNCTIONS:
 - remove_axis: Remove the current axis
 - rotate_molecule: Rotate selected atoms around axis by angle in degrees (-180 to 180)
 - translate_molecule: Move selected atoms along axis by distance in angstroms
+- to "translate/rotate atoms in a fragment", you need to create the axis, then un-select all the axis atoms and select the atoms you want to move. Then you can perform the translation/rotation. Remember, a fragment is the same as a group of atoms.
+- examples: "translate fragment 4 by 3 angstroms on the axis formed when connecting atoms 2 and 6.", "translate atoms [2,4,5,7,3] by 3 angstroms on the axis formed when connecting atoms 4 and 3."
 
 === MEASUREMENTS ===
 - measure_distance: Create distance label between 2 selected atoms
