@@ -303,6 +303,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_bonded_atoms",
+            "description": "Get bond information for specified atoms. Returns which atoms are bonded to the queried atoms and their element types. Use this to understand molecular connectivity.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Array of atom indices to check bonds for. If not provided, uses currently selected atoms.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "toggle_ribbon",
             "description": "Toggle ribbon view for protein structures",
             "parameters": {"type": "object", "properties": {}},
