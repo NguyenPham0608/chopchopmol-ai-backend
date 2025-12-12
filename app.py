@@ -440,7 +440,7 @@ STATE:
 - Molecule: {str(state.get('atomCount', 0)) + ' atoms' if state.get('hasAtoms') else 'None loaded'}
 - Selected: {state.get('selectedCount', 0)} atoms {('[' + ','.join(map(str, state.get('selectedIndices', []))) + ']') if state.get('selectedCount', 0) > 0 else ''}
 - Fragments: {len(state.get('fragments', []))} fragments and list of fragments and atoms: {json.dumps(state.get('fragments', []))} also it is zero based, so make sure you refer to the real fragment 0 as fragment 1 and so on. Same with atom indexes.
-- Axis: {'DEFINED' if state.get('hasAxis') else 'NOT defined'}
+- Axis: {'DEFINED between atoms ' + str([i+1 for i in state.get('axisAtoms', [])]) if state.get('hasAxis') and state.get('axisAtoms') else 'NOT defined'}
 - Protein: {'Yes' if state.get('hasRibbon') else 'No'}
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
