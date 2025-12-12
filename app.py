@@ -449,11 +449,11 @@ To rotate or translate atoms, you MUST call ALL 4 functions in sequence. DO NOT 
 
 1. select_atoms({{indices: [axis_atom1, axis_atom2]}}) - select 2 atoms that define the axis direction
 2. define_axis() - creates the rotation/translation axis  
-3. select_atoms({{indices: [atoms_to_move]}}) - select the atoms you want to transform (REQUIRED - do not skip!)
-4. rotate_molecule({{angle: X}}) OR translate_molecule({{distance: X}}) - perform the actual transformation (REQUIRED!)
+3. select_atoms({{indices: [atoms_to_move]}}) - select the atoms you want to transform (the axis STAYS defined!)
+4. rotate_molecule({{angle: X}}) OR translate_molecule({{distance: X}}) - perform the actual transformation
 
-WARNING: If you only call define_axis and stop, NOTHING WILL MOVE. You MUST complete all 4 steps!
-After each function succeeds, CONTINUE to the next step until step 4 is complete.
+IMPORTANT: The axis persists after step 3. Do NOT re-select axis atoms or call define_axis again. 
+After step 3 succeeds, proceed DIRECTLY to step 4 (rotate_molecule or translate_molecule).
 
 EXAMPLE: "rotate atoms 5,6,7 by 30 degrees around axis from atoms 0 to 1"
 Call these 4 functions:
