@@ -134,34 +134,34 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "rotate_molecule",
-            "description": "Rotate selected atoms (or all if none selected) around the defined axis by given angle",
+            "name": "transform_atoms",
+            "description": "Rotate or translate atoms around an axis defined by two atoms. Use this for ALL rotation and translation requests.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "axisAtom1": {
+                        "type": "integer",
+                        "description": "First atom index defining the axis (0-indexed)",
+                    },
+                    "axisAtom2": {
+                        "type": "integer",
+                        "description": "Second atom index defining the axis (0-indexed)",
+                    },
+                    "atomsToMove": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Array of atom indices to transform (0-indexed)",
+                    },
                     "angle": {
                         "type": "number",
-                        "description": "Rotation angle in degrees (-180 to 180)",
-                    }
-                },
-                "required": ["angle"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "translate_molecule",
-            "description": "Move selected atoms (or all if none selected) along the defined axis by given distance in angstroms",
-            "parameters": {
-                "type": "object",
-                "properties": {
+                        "description": "Rotation angle in degrees (use this OR distance, not both)",
+                    },
                     "distance": {
                         "type": "number",
-                        "description": "Distance to translate in angstroms (positive or negative)",
-                    }
+                        "description": "Translation distance in angstroms (use this OR angle, not both)",
+                    },
                 },
-                "required": ["distance"],
+                "required": ["axisAtom1", "axisAtom2", "atomsToMove"],
             },
         },
     },
@@ -444,40 +444,16 @@ STATE:
 - Protein: {'Yes' if state.get('hasRibbon') else 'No'}
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
-CRITICAL RULES FOR TRANSFORMATIONS:
-For ANY rotation or translation request, you MUST call ALL 4 functions. This is MANDATORY - do not skip step 4!
+=== TRANSFORMATIONS ===
+Use transform_atoms for ALL rotation/translation requests. It handles everything in one call.
 
-Step 1: select_atoms({{indices: [axis_atom1, axis_atom2]}})
-Step 2: define_axis()
-Step 3: select_atoms({{indices: [atoms_to_move]}})
-Step 4: translate_molecule({{distance: X}}) OR rotate_molecule({{angle: X}})  <-- REQUIRED! DO NOT SKIP!
+Example: "translate fragment 2 by 3 angstroms along axis from atoms 3 to 6"
+→ transform_atoms({{axisAtom1: 2, axisAtom2: 5, atomsToMove: [fragment 2's atoms], distance: 3}})
 
-YOU ARE NOT DONE UNTIL YOU CALL translate_molecule OR rotate_molecule IN STEP 4.
-Selecting atoms is NOT the same as moving them. You must call the transformation function!
-
-EXAMPLE: "translate fragment 2 by 3 angstroms along axis from atoms 3 to 6"
-You MUST call these 4 functions (fragment 2 = fragments[1], atoms 3,6 = indices 2,5):
-1. select_atoms({{indices: [2, 5]}})
-2. define_axis()
-3. select_atoms({{indices: [...fragment atoms...]}})
-4. translate_molecule({{distance: 3}})  <-- THIS IS THE ACTUAL MOVEMENT!
-
-EXAMPLE: "rotate atoms 5,6,7 by 30 degrees around axis from atoms 0 to 1"
-Call these 4 functions:
-1. select_atoms({{indices: [0, 1]}})
-2. define_axis()
-3. select_atoms({{indices: [5, 6, 7]}})
-4. rotate_molecule({{angle: 30}})
-
-EXAMPLE: "move atoms 2,3 by 2 angstroms along the bond between atoms 0 and 1"
-Call these 4 functions:
-1. select_atoms({{indices: [0, 1]}})
-2. define_axis()
-3. select_atoms({{indices: [2, 3]}})
-4. translate_molecule({{distance: 2}})
+Example: "rotate atoms 5,6,7 by 45 degrees around the bond between atoms 1 and 2"
+→ transform_atoms({{axisAtom1: 0, axisAtom2: 1, atomsToMove: [4, 5, 6], angle: 45}})
 
 ALL AVAILABLE FUNCTIONS:
-
 === SELECTION ===
 - select_atoms: Select atoms by indices array. Use add:true to add to selection, add:false to replace.
 - clear_selection: Deselect all atoms
