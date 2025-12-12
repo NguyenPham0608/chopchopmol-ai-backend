@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
 import os
@@ -616,6 +616,124 @@ def chat():
     except Exception as e:
         print(f"AI Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/chat/stream", methods=["POST"])
+def chat_stream():
+    data = request.json
+    session_id = data.get("sessionId", "default")
+    user_message = data.get("message", "")
+    state = data.get("state", {})
+    tool_results = data.get("toolResults")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "API key not set"}), 500
+
+    client = OpenAI(api_key=api_key)
+
+    if session_id not in sessions:
+        sessions[session_id] = []
+    conversationHistory = sessions[session_id]
+
+    if tool_results is None:
+        conversationHistory.append({"role": "user", "content": user_message})
+
+    systemPrompt = build_system_prompt(state)
+    messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[-10:]
+
+    if tool_results:
+        messages.append(tool_results["assistantMessage"])
+        for result in tool_results["results"]:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": result["tool_call_id"],
+                    "content": result["content"],
+                }
+            )
+
+    def generate():
+        try:
+            stream = client.chat.completions.create(
+                model="gpt-5.1",
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                max_completion_tokens=1024,
+                stream=True,
+            )
+
+            collected_content = ""
+            tool_calls_data = {}
+
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+
+                if delta.content:
+                    collected_content += delta.content
+                    yield f"data: {json.dumps({'type': 'text', 'content': delta.content})}\n\n"
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_data:
+                            tool_calls_data[idx] = {
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                        if tc.id:
+                            tool_calls_data[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_data[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_data[idx][
+                                    "arguments"
+                                ] += tc.function.arguments
+
+            if tool_calls_data:
+                tool_calls = [
+                    {
+                        "id": tc["id"],
+                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    }
+                    for tc in tool_calls_data.values()
+                ]
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": collected_content,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in tool_calls_data.values()
+                    ],
+                }
+                yield f"data: {json.dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
+            else:
+                if collected_content:
+                    conversationHistory.append(
+                        {"role": "assistant", "content": collected_content}
+                    )
+                yield f"data: {json.dumps({'type': 'done', 'sessionId': session_id})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/ai/clear", methods=["POST"])
