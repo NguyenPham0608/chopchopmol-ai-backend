@@ -445,15 +445,22 @@ STATE:
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
 CRITICAL RULES FOR TRANSFORMATIONS:
-To rotate or translate atoms, you MUST call ALL 4 functions in sequence. DO NOT STOP EARLY!
+For ANY rotation or translation request, you MUST call ALL 4 functions. This is MANDATORY - do not skip step 4!
 
-1. select_atoms({{indices: [axis_atom1, axis_atom2]}}) - select 2 atoms that define the axis direction
-2. define_axis() - creates the rotation/translation axis  
-3. select_atoms({{indices: [atoms_to_move]}}) - select the atoms you want to transform (the axis STAYS defined!)
-4. rotate_molecule({{angle: X}}) OR translate_molecule({{distance: X}}) - perform the actual transformation
+Step 1: select_atoms({{indices: [axis_atom1, axis_atom2]}})
+Step 2: define_axis()
+Step 3: select_atoms({{indices: [atoms_to_move]}})
+Step 4: translate_molecule({{distance: X}}) OR rotate_molecule({{angle: X}})  <-- REQUIRED! DO NOT SKIP!
 
-IMPORTANT: The axis persists after step 3. Do NOT re-select axis atoms or call define_axis again. 
-After step 3 succeeds, proceed DIRECTLY to step 4 (rotate_molecule or translate_molecule).
+YOU ARE NOT DONE UNTIL YOU CALL translate_molecule OR rotate_molecule IN STEP 4.
+Selecting atoms is NOT the same as moving them. You must call the transformation function!
+
+EXAMPLE: "translate fragment 2 by 3 angstroms along axis from atoms 3 to 6"
+You MUST call these 4 functions (fragment 2 = fragments[1], atoms 3,6 = indices 2,5):
+1. select_atoms({{indices: [2, 5]}})
+2. define_axis()
+3. select_atoms({{indices: [...fragment atoms...]}})
+4. translate_molecule({{distance: 3}})  <-- THIS IS THE ACTUAL MOVEMENT!
 
 EXAMPLE: "rotate atoms 5,6,7 by 30 degrees around axis from atoms 0 to 1"
 Call these 4 functions:
