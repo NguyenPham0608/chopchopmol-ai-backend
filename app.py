@@ -15,6 +15,61 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "create_file",
+            "description": "Create a new file in the open folder. AI can later edit files it creates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Filename with extension (e.g., 'molecule.xyz', 'notes.txt')",
+                    },
+                    "content": {"type": "string", "description": "File content"},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Edit a file that the AI previously created. Cannot edit user's original files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Filename to edit"},
+                    "content": {"type": "string", "description": "New file content"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read contents of a file in the open folder",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Filename to read"}
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_folder_files",
+            "description": "List all files in the currently open folder",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "select_atoms",
             "description": "Select atoms by their indices. Use this before any transformation.",
             "parameters": {
@@ -499,6 +554,14 @@ ALL AVAILABLE FUNCTIONS:
 - save_image: Save screenshot as PNG
 - save_xyz: Export molecule as XYZ file
 - load_molecule: Search PubChem database by molecule name (e.g., "caffeine", "aspirin")
+
+=== FILE EXPLORER ===
+- create_file: Create a new file in the open folder. You can edit files you create.
+- edit_file: Edit a file you previously created (cannot edit user's original files)
+- read_file: Read contents of any file in the folder
+- list_folder_files: List all files in the open folder
+
+Note: You can only edit files that YOU created, not the user's original files. This protects user data.
 
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
