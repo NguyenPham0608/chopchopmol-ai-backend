@@ -561,7 +561,7 @@ def chat():
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5.1",
+            model="gpt-5.1-mini",
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
