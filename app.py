@@ -136,6 +136,24 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "add_hydrogens",
+            "description": "Automatically add missing hydrogen atoms to the entire molecule (standard valence rules, neutral pH assumption).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pH": {
+                        "type": "number",
+                        "description": "Optional pH value for protonation state (default 7.4). Use for pH-aware addition.",
+                        "default": 7.4,
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "clear_selection",
             "description": "Clear all atom selections",
             "parameters": {"type": "object", "properties": {}},
