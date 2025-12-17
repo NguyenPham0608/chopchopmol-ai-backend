@@ -279,6 +279,36 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "rotational_scan",
+            "description": "Perform a rotational scan: rotate a fragment around an axis in increments through a full 360° rotation, generating frames that can be played with the frame slider. Useful for conformational analysis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "axisAtom1": {
+                        "type": "integer",
+                        "description": "First atom index defining the rotation axis (0-indexed)",
+                    },
+                    "axisAtom2": {
+                        "type": "integer",
+                        "description": "Second atom index defining the rotation axis (0-indexed)",
+                    },
+                    "atomsToMove": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Array of atom indices to rotate (0-indexed). Typically a fragment.",
+                    },
+                    "increment": {
+                        "type": "number",
+                        "description": "Rotation increment in degrees (e.g., 10 for 36 frames, 15 for 24 frames, 30 for 12 frames)",
+                    },
+                },
+                "required": ["axisAtom1", "axisAtom2", "atomsToMove", "increment"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "remove_atoms",
             "description": "Delete the currently selected atoms from the molecule",
             "parameters": {"type": "object", "properties": {}},
@@ -594,6 +624,11 @@ ALL AVAILABLE FUNCTIONS:
 - save_image: Save screenshot as PNG
 - save_xyz: Export molecule as XYZ file
 - load_molecule: Search PubChem database by molecule name (e.g., "caffeine", "aspirin")
+
+=== ANALYSIS ===
+- rotational_scan: Generate a 360° rotational scan of atoms around an axis. Specify axis atoms, atoms to rotate, and increment (e.g., 10° = 36 frames). Results play in the frame slider.
+  Example: "do a rotational scan of fragment 2 around the bond between atoms 3-4 with 15 degree increments"
+  → rotational_scan(axisAtom1: 2, axisAtom2: 3, atomsToMove: [fragment 2's atoms], increment: 15)
 
 === FILE EXPLORER ===
 - create_file: Create a new file in the open folder. You can edit files you create.
