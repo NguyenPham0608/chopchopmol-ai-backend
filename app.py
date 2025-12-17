@@ -48,6 +48,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "split_molecule",
+            "description": "Split a molecule into two fragments by breaking the bond between two atoms. The two atoms must be bonded. If the atoms are part of a ring (cycle), splitting is not possible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "atom1": {
+                        "type": "integer",
+                        "description": "Index of the first atom (0-based)",
+                    },
+                    "atom2": {
+                        "type": "integer",
+                        "description": "Index of the second atom (0-based). Must be bonded to atom1.",
+                    },
+                },
+                "required": ["atom1", "atom2"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read contents of a file in the open folder",
             "parameters": {
@@ -557,6 +578,7 @@ ALL AVAILABLE FUNCTIONS:
 === FRAGMENTS ===
 - create_fragment: Group selected atoms into a fragment for easier manipulation
 - isolate_selection: Isolate selected atoms/fragment to view separately
+- split_molecule: Split molecule into 2 fragments by breaking a bond between 2 atoms. Returns error if atoms form a ring.
 
 === VIEW & CAMERA ===
 - reset_camera: Reset camera to default position
