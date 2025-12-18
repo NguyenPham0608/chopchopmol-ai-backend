@@ -932,8 +932,13 @@ def ai_autocomplete():
     if len(query) < 2:
         return jsonify({"suggestions": []})
 
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"suggestions": []})
+
+    client = OpenAI(api_key=api_key)
+
     try:
-        # Build context-aware prompt
         context_hints = []
         if state.get("selectedCount", 0) > 0:
             context_hints.append(f"{state['selectedCount']} atoms selected")
@@ -941,6 +946,8 @@ def ai_autocomplete():
             context_hints.append("axis defined")
         if state.get("hasAtoms"):
             context_hints.append(f"{state.get('atomCount', 0)} atoms loaded")
+        if state.get("fragments") and len(state.get("fragments", [])) > 0:
+            context_hints.append(f"{len(state['fragments'])} fragments")
 
         context = ", ".join(context_hints) if context_hints else "no molecule loaded"
 
@@ -951,20 +958,29 @@ def ai_autocomplete():
             messages=[
                 {
                     "role": "system",
-                    "content": f"""You autocomplete commands for a molecular editor. Current state: {context}.
-Available actions: select atoms, rotate, translate, measure distance/angle, change element, create fragment, load molecule, toggle labels, reset camera, save file, undo, redo, rotational scan, set bond distance, delete atoms, add atom, zoom.
-Return 3-5 short command completions as JSON array: [{{"text": "command", "icon": "fa-icon"}}]
-Only return the JSON array, nothing else.""",
+                    "content": f"""You autocomplete commands for ChopChopMol, a 3D molecular editor. Current state: {context}.
+Available actions: select atoms by index/element, rotate, translate, measure distance/angle/dihedral, change element, create fragment, load molecule by name, toggle labels, reset camera, save xyz/image, undo, redo, rotational scan, set bond distance, delete atoms, add atom, zoom to fit, define axis, split molecule.
+Based on what the user is typing, suggest 3-5 complete commands they might want.
+Return ONLY a JSON array: [{{"text": "command", "icon": "fa-icon"}}]
+No explanation, just the JSON.""",
                 },
-                {"role": "user", "content": query},
+                {"role": "user", "content": f"Complete: {query}"},
             ],
         )
 
         text = response.choices[0].message.content.strip()
-        # Parse JSON from response
+
+        # Clean markdown if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
         if text.startswith("["):
             suggestions = json.loads(text)
             return jsonify({"suggestions": suggestions[:5]})
+
         return jsonify({"suggestions": []})
 
     except Exception as e:
