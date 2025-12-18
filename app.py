@@ -490,17 +490,21 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "save_xyz",
-            "description": "Save molecule as XYZ file. If a rotational scan has been performed (multiple frames exist), this automatically exports ALL frames as a multi-frame trajectory file.",
+            "description": "Save molecule as XYZ file. If a rotational scan was performed (multiple frames), automatically exports ALL frames as a trajectory. Can save to downloads or to the local file explorer folder.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "Optional filename for the export (default: auto-generated with timestamp)",
+                        "description": "Output filename (default: auto-generated with timestamp)",
                     },
                     "allFrames": {
                         "type": "boolean",
-                        "description": "If false, only export current frame even if multiple frames exist. Default is true (export all frames).",
+                        "description": "If false, only export current frame even if multiple frames exist. Default is true.",
+                    },
+                    "saveToLocal": {
+                        "type": "boolean",
+                        "description": "If true, save to the open local folder in file explorer instead of downloading. Requires a folder to be open.",
                     },
                 },
             },
@@ -634,7 +638,10 @@ ALL AVAILABLE FUNCTIONS:
 
 === FILE OPERATIONS ===
 - save_image: Save screenshot as PNG
-- save_xyz: Export molecule as XYZ file. Automatically exports ALL frames if a rotational scan was performed. Use filename param for custom name.
+- save_xyz: Export molecule as XYZ file. Automatically exports ALL frames if a rotational scan was performed. Options:
+  - filename: custom filename
+  - saveToLocal: true to save to open folder in file explorer (instead of downloading)
+  - allFrames: false to export only current frame
 - load_molecule: Search PubChem database by molecule name (e.g., "caffeine", "aspirin")
 
 === ANALYSIS ===
