@@ -951,10 +951,10 @@ def ai_autocomplete():
 
         context = ", ".join(context_hints) if context_hints else "no molecule loaded"
 
-        response = client.chat.completions.create(
+        # Use the Responses API for gpt-5-nano
+        response = client.responses.create(
             model="gpt-5-nano",
-            max_completion_tokens=150,
-            messages=[
+            input=[
                 {
                     "role": "system",
                     "content": f"""You autocomplete commands for ChopChopMol, a 3D molecular editor. Current state: {context}.
@@ -965,15 +965,27 @@ No explanation, just the JSON.""",
                 },
                 {"role": "user", "content": f"Complete: {query}"},
             ],
+            max_output_tokens=150,
         )
 
-        text = response.choices[0].message.content.strip()
+        # Extract text from the Responses API output
+        text = ""
+        for item in response.output:
+            if hasattr(item, "content"):
+                for content_block in item.content:
+                    if hasattr(content_block, "text"):
+                        text += content_block.text
+
+        text = text.strip()
+        print(f"Raw AI response: {text}")
 
         # Clean markdown if present
         if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
+            parts = text.split("```")
+            if len(parts) >= 2:
+                text = parts[1]
+                if text.startswith("json"):
+                    text = text[4:]
             text = text.strip()
 
         if text.startswith("["):
