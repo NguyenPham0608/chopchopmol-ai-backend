@@ -490,8 +490,20 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "save_xyz",
-            "description": "Save molecule as XYZ file",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "Save molecule as XYZ file. If a rotational scan has been performed (multiple frames exist), this automatically exports ALL frames as a multi-frame trajectory file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional filename for the export (default: auto-generated with timestamp)",
+                    },
+                    "allFrames": {
+                        "type": "boolean",
+                        "description": "If false, only export current frame even if multiple frames exist. Default is true (export all frames).",
+                    },
+                },
+            },
         },
     },
     {
@@ -622,7 +634,7 @@ ALL AVAILABLE FUNCTIONS:
 
 === FILE OPERATIONS ===
 - save_image: Save screenshot as PNG
-- save_xyz: Export molecule as XYZ file
+- save_xyz: Export molecule as XYZ file. Automatically exports ALL frames if a rotational scan was performed. Use filename param for custom name.
 - load_molecule: Search PubChem database by molecule name (e.g., "caffeine", "aspirin")
 
 === ANALYSIS ===
