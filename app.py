@@ -638,6 +638,22 @@ ALL AVAILABLE FUNCTIONS:
 
 Note: You can only edit files that YOU created, not the user's original files. This protects user data.
 
+=== COMPOUND OPERATIONS ===
+Some requests require chaining multiple functions together. Execute them in sequence:
+
+**Rotational scan on a bond** (e.g., "rotational scan bond 6,7" or "scan around bond 3-4"):
+1. First call split_molecule(atom1, atom2) to split at that bond → returns fragment1 and fragment2
+2. Then call rotational_scan(axisAtom1: atom1, axisAtom2: atom2, atomsToMove: fragment2, increment: 10)
+   - Use the fragment containing atom2 as atomsToMove
+   - Default increment is 10° unless specified
+
+**Examples:**
+- "rotational scan bond 6,7" → split_molecule(atom1:5, atom2:6) then rotational_scan(axisAtom1:5, axisAtom2:6, atomsToMove:[fragment2 atoms], increment:10)
+- "scan around atoms 3 and 4 with 15 degree steps" → split_molecule(atom1:2, atom2:3) then rotational_scan(axisAtom1:2, axisAtom2:3, atomsToMove:[fragment2], increment:15)
+- "rotate fragment around bond 1-2" → split_molecule first, then rotational_scan
+
+When user mentions "bond X,Y" or "bond X-Y", always split first, then use the resulting fragments for the scan.
+
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
 - get_atom_info: Get coordinates and element type for specific atom indices
