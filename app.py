@@ -921,3 +921,52 @@ def clear_history():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+
+@app.route("/ai/autocomplete", methods=["POST"])
+def ai_autocomplete():
+    data = request.json
+    query = data.get("query", "").strip()
+    state = data.get("state", {})
+
+    if len(query) < 2:
+        return jsonify({"suggestions": []})
+
+    try:
+        # Build context-aware prompt
+        context_hints = []
+        if state.get("selectedCount", 0) > 0:
+            context_hints.append(f"{state['selectedCount']} atoms selected")
+        if state.get("hasAxis"):
+            context_hints.append("axis defined")
+        if state.get("hasAtoms"):
+            context_hints.append(f"{state.get('atomCount', 0)} atoms loaded")
+
+        context = ", ".join(context_hints) if context_hints else "no molecule loaded"
+
+        response = client.chat.completions.create(
+            model="gpt-5-nano",
+            max_tokens=150,
+            temperature=0.3,
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"""You autocomplete commands for a molecular editor. Current state: {context}.
+Available actions: select atoms, rotate, translate, measure distance/angle, change element, create fragment, load molecule, toggle labels, reset camera, save file, undo, redo, rotational scan, set bond distance, delete atoms, add atom, zoom.
+Return 3-5 short command completions as JSON array: [{{"text": "command", "icon": "fa-icon"}}]
+Only return the JSON array, nothing else.""",
+                },
+                {"role": "user", "content": query},
+            ],
+        )
+
+        text = response.choices[0].message.content.strip()
+        # Parse JSON from response
+        if text.startswith("["):
+            suggestions = json.loads(text)
+            return jsonify({"suggestions": suggestions[:5]})
+        return jsonify({"suggestions": []})
+
+    except Exception as e:
+        print(f"Autocomplete error: {e}")
+        return jsonify({"suggestions": []})
