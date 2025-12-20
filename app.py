@@ -489,6 +489,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "translation_scan",
+            "description": "Perform a translation scan: move a fragment along an axis in increments, generating frames that can be played with the frame slider. Useful for dissociation curves or pulling fragments apart.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "axisAtom1": {
+                        "type": "integer",
+                        "description": "First atom index defining the axis direction (0-indexed)",
+                    },
+                    "axisAtom2": {
+                        "type": "integer",
+                        "description": "Second atom index defining the axis direction (0-indexed). Fragment moves in direction from atom1 to atom2.",
+                    },
+                    "atomsToMove": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Array of atom indices to translate (0-indexed)",
+                    },
+                    "totalDistance": {
+                        "type": "number",
+                        "description": "Total translation distance in angstroms (default: 3)",
+                    },
+                    "increment": {
+                        "type": "number",
+                        "description": "Step size in angstroms (default: 0.2)",
+                    },
+                },
+                "required": ["axisAtom1", "axisAtom2", "atomsToMove"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "save_xyz",
             "description": "Save molecule as XYZ file. If a rotational scan was performed (multiple frames), automatically exports ALL frames as a trajectory. Can save to downloads or to the local file explorer folder.",
             "parameters": {
@@ -668,6 +702,9 @@ Some requests require chaining multiple functions together. Execute them in sequ
 
 **Examples:**
 - "rotational scan bond 6,7" → split_molecule(atom1:5, atom2:6) then rotational_scan(axisAtom1:5, axisAtom2:6, atomsToMove:[fragment2 atoms], increment:10)
+- translation_scan: Generate a translation scan moving atoms along an axis. Specify axis atoms, atoms to move, total distance (default 3Å), and increment (default 0.2Å). Results play in the frame slider.
+  Example: "translation scan of fragment 2 along bond 3-4 for 5 angstroms with 0.1 step"
+  → translation_scan(axisAtom1: 3, axisAtom2: 4, atomsToMove: [fragment 2's atoms], totalDistance: 5, increment: 0.1)
 - "scan around atoms 3 and 4 with 15 degree steps" → split_molecule(atom1:2, atom2:3) then rotational_scan(axisAtom1:2, axisAtom2:3, atomsToMove:[fragment2], increment:15)
 - "rotate fragment around bond 1-2" → split_molecule first, then rotational_scan
 
