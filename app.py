@@ -898,7 +898,7 @@ def chat_stream():
     def generate():
         try:
             stream = client.chat.completions.create(
-                model=model,
+                model="gpt-5-mini",
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
