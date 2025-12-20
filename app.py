@@ -605,25 +605,29 @@ TOOLS = [
     },
     {
         "type": "function",
-        "name": "show_all_bond_lengths",
-        "description": "Show bond length labels for ALL bonds in the molecule at once",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "function": {
+            "name": "show_all_bond_lengths",
+            "description": "Show bond length labels for ALL bonds in the molecule at once",
+            "parameters": {"type": "object", "properties": {}},
+        },
     },
     {
         "type": "function",
-        "name": "remove_bond_label",
-        "description": "Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "atom1": {"type": "integer", "description": "First atom index"},
-                "atom2": {"type": "integer", "description": "Second atom index"},
-                "all": {
-                    "type": "boolean",
-                    "description": "Set true to remove all bond labels",
+        "function": {
+            "name": "remove_bond_label",
+            "description": "Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "atom1": {"type": "integer", "description": "First atom index"},
+                    "atom2": {"type": "integer", "description": "Second atom index"},
+                    "all": {
+                        "type": "boolean",
+                        "description": "Set true to remove all bond labels",
+                    },
                 },
+                "required": [],
             },
-            "required": [],
         },
     },
 ]
