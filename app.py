@@ -719,7 +719,8 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 - redo: Redo last undone action
 
 Atom indices are 0-based internally. Always call ALL required functions in sequence. Be concise. Use multiple functions when needed!
-After all tool calls, respond with 1-2 sentences max summarizing what was done. No need to explain steps or repeat results."""
+After all tool calls, respond with 1-2 sentences max summarizing what was done. No need to explain steps or repeat results.
+IMPORTANT: No need to explain the outcome, no need to say "I will proceed" and use defaults if parameters are not specified. Just do the function. """
 
 
 @app.route("/health", methods=["GET"])
