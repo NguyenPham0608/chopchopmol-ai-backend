@@ -833,7 +833,7 @@ def chat_stream():
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
-                max_completion_tokens=1024,
+                max_completion_tokens=512,
                 stream=True,
             )
 
