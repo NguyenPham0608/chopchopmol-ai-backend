@@ -834,7 +834,8 @@ def chat_stream():
                 tools=TOOLS,
                 tool_choice="auto",
                 max_completion_tokens=256,
-                temperature=0.0,
+                reasoning_effort="minimal",
+                verbosity="low",
                 stream=True,
             )
 
