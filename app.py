@@ -643,6 +643,7 @@ STATE:
 - Fragments: {len(state.get('fragments', []))} fragments and list of fragments and atoms: {json.dumps(state.get('fragments', []))} also it is zero based, so make sure you refer to the real fragment 0 as fragment 1 and so on. Same with atom indexes.
 - Axis: {'DEFINED from atom ' + str(state.get('axisAtoms', [])[0]+1) + ' to atom ' + str(state.get('axisAtoms', [])[1]+1) + ' (0-based indices: ' + str(state.get('axisAtoms', [])[0]) + ' and ' + str(state.get('axisAtoms', [])[1]) + ')' if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'NOT defined'}
 - Protein: {'Yes' if state.get('hasRibbon') else 'No'}
+- Bond Labels: {len(state.get('bondLabels', []))} labels on bonds {json.dumps(state.get('bondLabels', []))}
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
 === TRANSFORMATIONS ===
