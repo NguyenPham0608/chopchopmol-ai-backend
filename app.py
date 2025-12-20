@@ -802,7 +802,7 @@ def chat():
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5.1-mini",
+            model="gpt-5-mini",
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
@@ -902,7 +902,7 @@ def chat_stream():
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
-                max_completion_tokens=256,
+                max_completion_tokens=1024,
                 reasoning_effort="low",
                 verbosity="low",
                 stream=True,
