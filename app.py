@@ -604,11 +604,13 @@ TOOLS = [
         },
     },
     {
+        "type": "function",
         "name": "show_all_bond_lengths",
         "description": "Show bond length labels for ALL bonds in the molecule at once",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "type": "function",
         "name": "remove_bond_label",
         "description": "Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels",
         "input_schema": {
