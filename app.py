@@ -603,6 +603,27 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "name": "show_all_bond_lengths",
+        "description": "Show bond length labels for ALL bonds in the molecule at once",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "remove_bond_label",
+        "description": "Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "atom1": {"type": "integer", "description": "First atom index"},
+                "atom2": {"type": "integer", "description": "Second atom index"},
+                "all": {
+                    "type": "boolean",
+                    "description": "Set true to remove all bond labels",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -654,6 +675,8 @@ ALL AVAILABLE FUNCTIONS:
 - measure_angle: Create angle label for 3 selected atoms (middle atom is vertex)
 - measure_dihedral: Create dihedral/torsion angle label for 4 selected atoms
 - clear_measurements: Remove all measurement labels
+- show_all_bond_lengths: Show bond length labels for ALL bonds in the molecule
+- remove_bond_label: Remove bond label(s). Use atom1/atom2 for specific bond, or all:true to remove all
 
 === FRAGMENTS ===
 - create_fragment: Group selected atoms into a fragment for easier manipulation
