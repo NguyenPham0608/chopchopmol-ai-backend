@@ -873,7 +873,7 @@ def chat_stream():
                 tools=TOOLS,
                 tool_choice="auto",
                 max_completion_tokens=256,
-                reasoning_effort="minimal",
+                reasoning_effort="low",
                 verbosity="low",
                 stream=True,
             )
