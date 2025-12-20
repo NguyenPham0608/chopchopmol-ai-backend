@@ -835,6 +835,7 @@ def chat_stream():
     user_message = data.get("message", "")
     state = data.get("state", {})
     tool_results = data.get("toolResults")
+    model = data.get("model", "gpt-5-mini")
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -866,7 +867,7 @@ def chat_stream():
     def generate():
         try:
             stream = client.chat.completions.create(
-                model="gpt-5-mini",
+                model=model,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
