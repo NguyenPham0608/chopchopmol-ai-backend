@@ -1007,7 +1007,7 @@ def transcribe_audio():
         client = OpenAI(api_key=api_key)
 
         # Save to temp file (OpenAI needs a file-like object with a name)
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             audio_file.save(tmp.name)
             tmp_path = tmp.name
 
