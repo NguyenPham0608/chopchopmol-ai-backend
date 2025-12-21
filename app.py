@@ -3,6 +3,8 @@ from flask_cors import CORS
 from openai import OpenAI
 import os
 import json
+import tempfile
+import io
 
 app = Flask(__name__)
 CORS(app)
@@ -987,6 +989,40 @@ def clear_history():
     if session_id in sessions:
         sessions[session_id] = []
     return jsonify({"success": True})
+
+
+@app.route("/ai/transcribe", methods=["POST"])
+def transcribe_audio():
+    """Transcribe audio using OpenAI Whisper API"""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "API key not set"}), 500
+
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+
+    audio_file = request.files["audio"]
+
+    try:
+        client = OpenAI(api_key=api_key)
+
+        # Save to temp file (OpenAI needs a file-like object with a name)
+        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+            audio_file.save(tmp.name)
+            tmp_path = tmp.name
+
+        with open(tmp_path, "rb") as f:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", file=f, response_format="text"
+            )
+
+        os.unlink(tmp_path)  # Clean up temp file
+
+        return jsonify({"text": transcript})
+
+    except Exception as e:
+        print(f"Transcription error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
