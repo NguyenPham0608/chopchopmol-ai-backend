@@ -795,21 +795,19 @@ def chat_stream():
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
 
-        t_prompt = time.time()
-        systemPrompt = build_system_prompt(state)
-        print(
-            f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
-            flush=True,
-        )
+    t_prompt = time.time()
+    systemPrompt = build_system_prompt(state)
+    print(
+        f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
+        flush=True,
+    )
 
-        messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[
-            -10:
-        ]
-        total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
-        print(
-            f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
-            flush=True,
-        )
+    messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[-10:]
+    total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
+    print(
+        f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
+        flush=True,
+    )
 
     if tool_results:
         messages.append(tool_results["assistantMessage"])
