@@ -4,7 +4,6 @@ from openai import OpenAI
 import os
 import orjson
 import tempfile
-import io
 
 
 def dumps(obj):
@@ -16,6 +15,9 @@ CORS(app)
 
 # Store sessions in memory
 sessions = {}
+
+# Global OpenAI client - reuses TCP connection
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # Tools schema - exact copy from original buildToolsSchema()
 TOOLS = [
@@ -774,11 +776,8 @@ def chat_stream():
     tool_results = data.get("toolResults")
     model = data.get("model", "gpt-5-mini")
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not client.api_key:
         return jsonify({"error": "API key not set"}), 500
-
-    client = OpenAI(api_key=api_key)
 
     if session_id not in sessions:
         sessions[session_id] = []
@@ -897,8 +896,7 @@ def clear_history():
 @app.route("/ai/transcribe", methods=["POST"])
 def transcribe_audio():
     """Transcribe audio using OpenAI Whisper API"""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not client.api_key:
         return jsonify({"error": "API key not set"}), 500
 
     if "audio" not in request.files:
@@ -907,7 +905,6 @@ def transcribe_audio():
     audio_file = request.files["audio"]
 
     try:
-        client = OpenAI(api_key=api_key)
 
         # Save to temp file (OpenAI needs a file-like object with a name)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
