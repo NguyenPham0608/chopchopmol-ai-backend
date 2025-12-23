@@ -2,9 +2,14 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
 import os
-import json
+import orjson
 import tempfile
 import io
+
+
+def dumps(obj):
+    return orjson.dumps(obj).decode()
+
 
 app = Flask(__name__)
 CORS(app)
@@ -642,10 +647,10 @@ def build_system_prompt(state):
 STATE:
 - Molecule: {str(state.get('atomCount', 0)) + ' atoms' if state.get('hasAtoms') else 'None loaded'}
 - Selected: {state.get('selectedCount', 0)} atoms {('[' + ','.join(map(str, state.get('selectedIndices', []))) + ']') if state.get('selectedCount', 0) > 0 else ''}
-- Fragments: {len(state.get('fragments', []))} fragments and list of fragments and atoms: {json.dumps(state.get('fragments', []))} also it is zero based, so make sure you refer to the real fragment 0 as fragment 1 and so on. Same with atom indexes.
+- Fragments: {len(state.get('fragments', []))} fragments and list of fragments and atoms: {dumps(state.get('fragments', []))} also it is zero based
 - Axis: {'DEFINED from atom ' + str(state.get('axisAtoms', [])[0]+1) + ' to atom ' + str(state.get('axisAtoms', [])[1]+1) + ' (0-based indices: ' + str(state.get('axisAtoms', [])[0]) + ' and ' + str(state.get('axisAtoms', [])[1]) + ')' if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'NOT defined'}
 - Protein: {'Yes' if state.get('hasRibbon') else 'No'}
-- Bond Labels: {len(state.get('bondLabels', []))} labels on bonds {json.dumps(state.get('bondLabels', []))}
+- Bond Labels: {len(state.get('bondLabels', []))} labels on bonds {dumps(state.get('bondLabels', []))}
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
 === TRANSFORMATIONS ===
@@ -819,8 +824,7 @@ def chat_stream():
 
                 if delta.content:
                     collected_content += delta.content
-                    yield f"data: {json.dumps({'type': 'text', 'content': delta.content})}\n\n"
-
+                    yield f"data: {dumps({'type': 'text', 'content': delta.content})}\n\n"
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -863,16 +867,16 @@ def chat_stream():
                         for tc in tool_calls_data.values()
                     ],
                 }
-                yield f"data: {json.dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
+                yield f"data: {dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
             else:
                 if collected_content:
                     conversationHistory.append(
                         {"role": "assistant", "content": collected_content}
                     )
-                yield f"data: {json.dumps({'type': 'done', 'sessionId': session_id})}\n\n"
+                yield f"data: {dumps({'type': 'done', 'sessionId': session_id})}\n\n"
 
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            yield f"data: {dumps({'type': 'error', 'error': str(e)})}\n\n"
 
     return Response(
         generate(),
