@@ -769,12 +769,21 @@ def health():
 
 @app.route("/ai/chat/stream", methods=["POST"])
 def chat_stream():
+    import time
+
+    t_request = time.time()
+
     data = request.json
     session_id = data.get("sessionId", "default")
     user_message = data.get("message", "")
     state = data.get("state", {})
     tool_results = data.get("toolResults")
     model = data.get("model", "gpt-5-mini")
+
+    print(
+        f"📥 Request received: {len(user_message)} chars, state: {len(str(state))} chars",
+        flush=True,
+    )
 
     if not client.api_key:
         return jsonify({"error": "API key not set"}), 500
@@ -786,8 +795,21 @@ def chat_stream():
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
 
-    systemPrompt = build_system_prompt(state)
-    messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[-10:]
+        t_prompt = time.time()
+        systemPrompt = build_system_prompt(state)
+        print(
+            f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
+            flush=True,
+        )
+
+        messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[
+            -10:
+        ]
+        total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
+        print(
+            f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
+            flush=True,
+        )
 
     if tool_results:
         messages.append(tool_results["assistantMessage"])
@@ -801,6 +823,8 @@ def chat_stream():
             )
 
     def generate():
+        t0 = time.time()
+        print(f"🚀 Starting OpenAI call...", flush=True)
         try:
             stream = client.chat.completions.create(
                 model="gpt-5-mini",
@@ -813,10 +837,18 @@ def chat_stream():
                 stream=True,
             )
 
+            print(f"📡 Stream created: {(time.time() - t0) * 1000:.0f}ms", flush=True)
+
             collected_content = ""
             tool_calls_data = {}
+            first_chunk = True
 
             for chunk in stream:
+                if first_chunk:
+                    print(
+                        f"🔥 OpenAI TTFT: {(time.time() - t0) * 1000:.0f}ms", flush=True
+                    )
+                    first_chunk = False
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
                     continue
@@ -842,6 +874,11 @@ def chat_stream():
                                 tool_calls_data[idx][
                                     "arguments"
                                 ] += tc.function.arguments
+
+            print(
+                f"✅ Stream complete: {len(collected_content)} chars, total: {(time.time() - t0) * 1000:.0f}ms",
+                flush=True,
+            )
 
             if tool_calls_data:
                 tool_calls = [
