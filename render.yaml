@@ -2,10 +2,10 @@ services:
   - type: web
     name: chopchopmol-ai-backend
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 120
     envVars:
       - key: OPENAI_API_KEY
-        sync: false  # Set manually in Render dashboard
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11"

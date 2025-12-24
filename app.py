@@ -4,6 +4,20 @@ from openai import OpenAI
 import os
 import orjson
 import tempfile
+import numpy as np
+from ase import Atoms
+
+# Lazy-load MACE to avoid slow startup
+_mace_calc = None
+
+
+def get_mace_calculator():
+    global _mace_calc
+    if _mace_calc is None:
+        from mace.calculators import mace_mp
+
+        _mace_calc = mace_mp(model="small", default_dtype="float32", device="cpu")
+    return _mace_calc
 
 
 def dumps(obj):
@@ -639,6 +653,34 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_energy",
+            "description": "Calculate the potential energy of the current molecule using MACE machine learning potential. Returns energy in eV and kcal/mol, plus forces on each atom.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "optimize_geometry",
+            "description": "Optimize the molecular geometry to minimize energy using MACE ML potential. Atoms will move to lower-energy positions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fmax": {
+                        "type": "number",
+                        "description": "Force convergence threshold in eV/Å (default: 0.05, lower = tighter)",
+                    },
+                    "maxSteps": {
+                        "type": "integer",
+                        "description": "Maximum optimization steps (default: 100)",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -748,6 +790,10 @@ Some requests require chaining multiple functions together. Execute them in sequ
 - "rotate fragment around bond 1-2" → split_molecule first, then rotational_scan
 
 When user mentions "bond X,Y" or "bond X-Y", always split first, then use the resulting fragments for the scan.
+
+=== ENERGY & OPTIMIZATION ===
+- calculate_energy: Calculate potential energy using MACE ML potential (returns eV, kcal/mol, forces)
+- optimize_geometry: Geometry optimization to minimize energy. Optional: fmax (convergence, default 0.05), maxSteps (default 100)
 
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
@@ -922,6 +968,84 @@ def chat_stream():
             "Access-Control-Allow-Headers": "Content-Type",
         },
     )
+
+
+@app.route("/ai/mace/energy", methods=["POST"])
+def calculate_energy():
+    """Calculate single-point energy using MACE-MP"""
+    data = request.json
+    atoms_data = data.get("atoms", [])
+
+    if not atoms_data:
+        return jsonify({"error": "No atoms provided"}), 400
+
+    try:
+        symbols = [a["element"] for a in atoms_data]
+        positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+
+        atoms = Atoms(symbols=symbols, positions=positions)
+        atoms.calc = get_mace_calculator()
+
+        energy = float(atoms.get_potential_energy())
+        forces = atoms.get_forces().tolist()
+
+        return jsonify(
+            {
+                "success": True,
+                "energy_eV": energy,
+                "energy_kcal": energy * 23.0609,  # eV to kcal/mol
+                "forces": forces,
+                "max_force": float(np.max(np.abs(forces))),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/mace/optimize", methods=["POST"])
+def optimize_geometry():
+    """Geometry optimization using MACE-MP + ASE BFGS"""
+    from ase.optimize import BFGS
+    import io
+
+    data = request.json
+    atoms_data = data.get("atoms", [])
+    fmax = data.get("fmax", 0.05)  # convergence threshold
+    max_steps = data.get("maxSteps", 100)
+
+    if not atoms_data:
+        return jsonify({"error": "No atoms provided"}), 400
+
+    try:
+        symbols = [a["element"] for a in atoms_data]
+        positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+
+        atoms = Atoms(symbols=symbols, positions=positions)
+        atoms.calc = get_mace_calculator()
+
+        # Run optimization
+        opt = BFGS(atoms, logfile=None)
+        converged = opt.run(fmax=fmax, steps=max_steps)
+
+        # Get final positions and energy
+        final_positions = atoms.get_positions().tolist()
+        final_energy = float(atoms.get_potential_energy())
+
+        return jsonify(
+            {
+                "success": True,
+                "converged": converged,
+                "steps": opt.nsteps,
+                "energy_eV": final_energy,
+                "energy_kcal": final_energy * 23.0609,
+                "positions": [
+                    {"index": i, "x": p[0], "y": p[1], "z": p[2]}
+                    for i, p in enumerate(final_positions)
+                ],
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ai/clear", methods=["POST"])

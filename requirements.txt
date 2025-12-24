@@ -4,3 +4,6 @@ openai
 httpx==0.28.1
 gunicorn==23.0.0
 orjson
+torch
+mace-torch
+ase
