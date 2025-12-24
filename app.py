@@ -11,7 +11,7 @@ def dumps(obj):
 
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/ai/*": {"origins": "*"}}, supports_credentials=False)
 
 # Store sessions in memory
 sessions = {}
@@ -915,7 +915,12 @@ def chat_stream():
     return Response(
         generate(),
         mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type",
+        },
     )
 
 
