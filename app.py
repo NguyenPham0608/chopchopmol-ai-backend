@@ -859,6 +859,10 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 - get_molecule_info: Get atom count, element breakdown, selection status
 - get_atom_info: Get coordinates and element type for specific atom indices
 
+=== VISUALIZATION ===
+- create_chart: Generate a chart (line/bar/scatter) and display it in chat. Use for energy profiles, scan results, any data visualization.
+  Example: After calculate_all_energies, plot energy vs frame with create_chart(x: [0,1,2...], y: [energies], title: "Energy Profile", xLabel: "Frame", yLabel: "Energy (eV)")
+
 === UNDO/REDO ===
 - undo: Undo last action
 - redo: Redo last undone action
