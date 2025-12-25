@@ -1067,6 +1067,18 @@ def calculate_energy():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/ai/mace/test", methods=["GET"])
+def test_mace():
+    """Test if MACE loads"""
+    import traceback
+
+    try:
+        calc = get_mace_calculator()
+        return jsonify({"success": True, "message": "MACE loaded"})
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
 @app.route("/ai/mace/optimize", methods=["POST"])
 def optimize_geometry():
     """Geometry optimization using MACE-MP + ASE BFGS"""
