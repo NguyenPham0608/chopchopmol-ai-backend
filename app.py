@@ -664,6 +664,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "calculate_all_energies",
+            "description": "Calculate energy for ALL frames in a multi-frame molecule (e.g., from rotational/translation scan). Returns energy for each frame and identifies lowest/highest energy conformations.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "optimize_geometry",
             "description": "Optimize the molecular geometry to minimize energy using MACE ML potential. Atoms will move to lower-energy positions.",
             "parameters": {
@@ -695,6 +703,7 @@ STATE:
 - Axis: {'DEFINED from atom ' + str(state.get('axisAtoms', [])[0]+1) + ' to atom ' + str(state.get('axisAtoms', [])[1]+1) + ' (0-based indices: ' + str(state.get('axisAtoms', [])[0]) + ' and ' + str(state.get('axisAtoms', [])[1]) + ')' if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'NOT defined'}
 - Protein: {'Yes' if state.get('hasRibbon') else 'No'}
 - Bond Labels: {len(state.get('bondLabels', []))} labels on bonds {dumps(state.get('bondLabels', []))}
+- Frames: {state.get('frameCount', 0)} frames loaded{' (current: ' + str(state.get('currentFrame', 0) + 1) + ')' if state.get('frameCount', 0) > 1 else ''}
 Make sure that when talking about atoms, what you see is 0-based but what the user sees is 1-based, so refer to atom 0 as atom 1 and so on.
 
 === TRANSFORMATIONS ===
@@ -794,6 +803,11 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 === ENERGY & OPTIMIZATION ===
 - calculate_energy: Calculate potential energy using MACE ML potential (returns eV, kcal/mol, forces)
 - optimize_geometry: Geometry optimization to minimize energy. Optional: fmax (convergence, default 0.05), maxSteps (default 100)
+
+=== ENERGY & OPTIMIZATION (MACE ML) ===
+- calculate_energy: Get potential energy of CURRENT frame (eV, kcal/mol) and forces
+- calculate_all_energies: Calculate energy for ALL frames at once. Returns energy per frame and identifies lowest/highest energy conformations. Use this after rotational/translation scans.
+- optimize_geometry: Geometry optimization to minimize energy. Options: fmax (default 0.05), maxSteps (default 100)
 
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
@@ -1045,6 +1059,59 @@ def optimize_geometry():
             }
         )
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/mace/energy-batch", methods=["POST"])
+def calculate_energy_batch():
+    """Calculate energy for multiple frames"""
+    data = request.json
+    frames_data = data.get("frames", [])
+
+    if not frames_data:
+        return jsonify({"error": "No frames provided"}), 400
+
+    try:
+        calc = get_mace_calculator()
+        results = []
+
+        for i, atoms_data in enumerate(frames_data):
+            symbols = [a["element"] for a in atoms_data]
+            positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+
+            atoms = Atoms(symbols=symbols, positions=positions)
+            atoms.calc = calc
+
+            energy = float(atoms.get_potential_energy())
+            forces = atoms.get_forces()
+            max_force = float(np.max(np.linalg.norm(forces, axis=1)))
+
+            results.append(
+                {
+                    "frame": i,
+                    "energy_eV": round(energy, 6),
+                    "energy_kcal": round(energy * 23.0609, 4),
+                    "max_force_eV_A": round(max_force, 6),
+                }
+            )
+
+        # Find min/max energy frames
+        energies = [r["energy_eV"] for r in results]
+        min_idx = int(np.argmin(energies))
+        max_idx = int(np.argmax(energies))
+
+        return jsonify(
+            {
+                "success": True,
+                "frameCount": len(results),
+                "energies": results,
+                "lowestEnergyFrame": min_idx,
+                "highestEnergyFrame": max_idx,
+                "energyRange_eV": round(max(energies) - min(energies), 6),
+            }
+        )
+    except Exception as e:
+        print(f"MACE batch error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 
