@@ -6,6 +6,8 @@ import orjson
 import tempfile
 import numpy as np
 from ase import Atoms
+import base64
+from io import BytesIO
 
 # Lazy-load MACE to avoid slow startup
 _mace_calc = None
@@ -689,6 +691,50 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_chart",
+            "description": "Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["line", "bar", "scatter"],
+                        "description": "Chart type (default: line)",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Chart title",
+                    },
+                    "xLabel": {
+                        "type": "string",
+                        "description": "X-axis label",
+                    },
+                    "yLabel": {
+                        "type": "string",
+                        "description": "Y-axis label",
+                    },
+                    "x": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "X-axis values",
+                    },
+                    "y": {
+                        "type": "array",
+                        "description": "Y-axis values (array of numbers, or array of arrays for multiple series)",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels for multiple series (optional)",
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
 ]
 
 
@@ -1112,6 +1158,96 @@ def calculate_energy_batch():
         )
     except Exception as e:
         print(f"MACE batch error: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/chart", methods=["POST"])
+def generate_chart():
+    """Generate a chart image from data"""
+    import matplotlib
+
+    matplotlib.use("Agg")  # Non-interactive backend
+    import matplotlib.pyplot as plt
+
+    data = request.json
+    chart_type = data.get("type", "line")
+    title = data.get("title", "")
+    x_label = data.get("xLabel", "")
+    y_label = data.get("yLabel", "")
+    x_values = data.get("x", [])
+    y_values = data.get("y", [])
+    labels = data.get("labels", None)  # For multiple series
+
+    try:
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=100)
+        fig.patch.set_facecolor("#1a1a2e")
+        ax.set_facecolor("#1a1a2e")
+
+        # Style for dark theme
+        ax.tick_params(colors="white")
+        ax.xaxis.label.set_color("white")
+        ax.yaxis.label.set_color("white")
+        ax.title.set_color("white")
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+
+        colors = ["#667eea", "#f093fb", "#4fd1c5", "#f6ad55", "#fc8181"]
+
+        if chart_type == "line":
+            if isinstance(y_values[0], list):  # Multiple series
+                for i, series in enumerate(y_values):
+                    label = labels[i] if labels and i < len(labels) else f"Series {i+1}"
+                    ax.plot(
+                        x_values,
+                        series,
+                        marker="o",
+                        color=colors[i % len(colors)],
+                        label=label,
+                        linewidth=2,
+                        markersize=4,
+                    )
+                ax.legend(facecolor="#1a1a2e", edgecolor="#444", labelcolor="white")
+            else:
+                ax.plot(
+                    x_values,
+                    y_values,
+                    marker="o",
+                    color=colors[0],
+                    linewidth=2,
+                    markersize=4,
+                )
+
+        elif chart_type == "bar":
+            ax.bar(
+                x_values, y_values, color=colors[0], edgecolor="white", linewidth=0.5
+            )
+
+        elif chart_type == "scatter":
+            ax.scatter(
+                x_values, y_values, c=colors[0], s=50, edgecolor="white", linewidth=0.5
+            )
+
+        if title:
+            ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+        if x_label:
+            ax.set_xlabel(x_label, fontsize=11)
+        if y_label:
+            ax.set_ylabel(y_label, fontsize=11)
+
+        ax.grid(True, alpha=0.2, color="white")
+        plt.tight_layout()
+
+        # Save to base64
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode("utf-8")
+        plt.close(fig)
+
+        return jsonify({"success": True, "image": img_base64})
+
+    except Exception as e:
+        print(f"Chart error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 

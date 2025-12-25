@@ -7,3 +7,4 @@ orjson
 torch
 mace-torch
 ase
+matplotlib
