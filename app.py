@@ -485,7 +485,6 @@ def optimize_geometry():
 
 @app.route("/ai/mace/energy-batch", methods=["POST"])
 def calculate_energy_batch():
-    """Calculate energy for multiple frames"""
     data = request.json
     frames_data = data.get("frames", [])
 
@@ -496,12 +495,16 @@ def calculate_energy_batch():
         calc = get_mace_calculator()
         results = []
 
-        for i, atoms_data in enumerate(frames_data):
-            symbols = [a["element"] for a in atoms_data]
-            positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+        # Create atoms object once from first frame
+        first_frame = frames_data[0]
+        symbols = [a["element"] for a in first_frame]
+        positions = [[a["x"], a["y"], a["z"]] for a in first_frame]
+        atoms = Atoms(symbols=symbols, positions=positions)
+        atoms.calc = calc
 
-            atoms = Atoms(symbols=symbols, positions=positions)
-            atoms.calc = calc
+        for i, atoms_data in enumerate(frames_data):
+            positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+            atoms.set_positions(positions)  # Update positions, triggers recalc
 
             energy = float(atoms.get_potential_energy())
             forces = atoms.get_forces()
@@ -516,7 +519,6 @@ def calculate_energy_batch():
                 }
             )
 
-        # Find min/max energy frames
         energies = [r["energy_eV"] for r in results]
         min_idx = int(np.argmin(energies))
         max_idx = int(np.argmax(energies))
