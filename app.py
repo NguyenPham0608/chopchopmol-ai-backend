@@ -723,7 +723,8 @@ TOOLS = [
                     },
                     "y": {
                         "type": "array",
-                        "description": "Y-axis values (array of numbers, or array of arrays for multiple series)",
+                        "items": {"type": "number"},
+                        "description": "Y-axis values",
                     },
                     "labels": {
                         "type": "array",
