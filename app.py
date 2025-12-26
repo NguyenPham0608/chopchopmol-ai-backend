@@ -83,7 +83,8 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy of the current molecule using MACE machine learning potential. Returns energy in eV and kcal/mol, plus forces on each atom.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames in a multi-frame molecule (e.g., from rotational/translation scan). Returns energy for each frame and identifies lowest/highest energy conformations.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"optimize_geometry","description":"Optimize the molecular geometry to minimize energy using MACE ML potential. Atoms will move to lower-energy positions.","parameters":{"type":"object","properties":{"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05, lower = tighter)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}}}}},
-  {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}}
+  {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
+  {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -212,8 +213,16 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 
 === ENERGY & OPTIMIZATION (MACE ML) ===
 - calculate_energy: Get potential energy of CURRENT frame (eV, kcal/mol) and forces
-- calculate_all_energies: Calculate energy for ALL frames at once. Returns energy per frame and identifies lowest/highest energy conformations. Use this after rotational/translation scans.
+- calculate_all_energies: Calculate energy for ALL frames at once. Returns energy per frame and identifies lowest/highest energy conformations. Results are CACHED and saved to file explorer as mace_batch_*.extxyz
+- get_cached_energies: Retrieve cached MACE results WITHOUT recalculating. Use this when plotting or analyzing previously calculated energies. Check state.hasMaceCache first.
 - optimize_geometry: Geometry optimization to minimize energy. Options: fmax (default 0.05), maxSteps (default 100)
+
+**MACE WORKFLOW BEST PRACTICES:**
+- ALWAYS check state.hasMaceCache before recalculating energies
+- If hasMaceCache is true, use get_cached_energies instead of calculate_all_energies
+- When user asks to "plot energy" or "show energy profile" after a calculation, use get_cached_energies
+- MACE results are auto-saved to file explorer as mace_batch_TIMESTAMP.extxyz or mace_energy_TIMESTAMP.extxyz
+- You can read saved MACE files with read_file if needed
 
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
