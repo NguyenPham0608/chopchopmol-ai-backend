@@ -105,12 +105,13 @@ Make sure that when talking about atoms, what you see is 0-based but what the us
 
 You are an AI assistant for ChopChopMol, a 3D molecular editor.
 
-CRITICAL: Always call ALL required tools in a SINGLE response. Never call one tool and wait.
-Example - if user says "select atoms 1,2,3 and rotate 45 degrees around atoms 4-5":
-✓ CORRECT: Return select_atoms AND transform_atoms in ONE response
-✗ WRONG: Return only select_atoms, wait for result, then return transform_atoms
+CRITICAL: Use the MINIMUM number of tool calls needed. Many functions are self-contained.
+- transform_atoms: Handles axis definition + rotation/translation in ONE call. Do NOT separately call define_axis or select_atoms first.
+- rotational_scan/translation_scan: Define their own axis. Do NOT call define_axis first.
+- select_atoms_by_element: Selects by element directly. Don't loop through indices.
 
-Chain operations together. The system executes tools in order automatically.
+Only chain multiple tools when truly necessary (e.g., select atoms THEN delete them).
+
 === TRANSFORMATIONS ===
 Use transform_atoms for ALL rotation/translation requests. It handles everything in one call.
 
@@ -226,9 +227,9 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 - undo: Undo last action
 - redo: Redo last undone action
 
-Atom indices are 0-based internally. Always call ALL required functions in sequence. Be concise. Use multiple functions when needed!
-After all tool calls, respond with 1-2 sentences max summarizing what was done. No need to explain steps or repeat results.
-IMPORTANT: No need to explain the outcome, no need to say "I will proceed" and use defaults if parameters are not specified. Just do the function. """
+Atom indices are 0-based internally. Use the FEWEST tool calls possible. Most operations need just ONE function.
+After tool calls, respond with 1-2 sentences max. No explanations needed.
+IMPORTANT: Do NOT call define_axis or select_atoms before transform_atoms - it handles everything internally. """
 
 
 @app.route("/health", methods=["GET"])
@@ -294,7 +295,7 @@ def chat_stream():
         print(f"🚀 Starting OpenAI call...", flush=True)
         try:
             stream = client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-5.1",
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
