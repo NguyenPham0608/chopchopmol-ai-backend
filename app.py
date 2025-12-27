@@ -10,16 +10,43 @@ import base64
 from io import BytesIO
 
 # Lazy-load MACE to avoid slow startup
-_mace_calc = None
+_mace_calculators = {}
+
+MACE_MODELS = {
+    "mace-mp-0a": {
+        "url": "medium",
+        "name": "MACE-MP-0a",
+        "description": "Original foundation model. Good general-purpose accuracy for materials.",
+        "speed": "Fast",
+        "best_for": "General materials, quick calculations",
+    },
+    "mace-mp-0b3": {
+        "url": "https://github.com/ACEsuit/mace-foundations/releases/download/mace_mp_0b3/mace-mp-0b3-medium.model",
+        "name": "MACE-MP-0b3",
+        "description": "Improved high-pressure stability and better reference energies.",
+        "speed": "Fast",
+        "best_for": "High-pressure systems, better energy references",
+    },
+    "mace-mpa-0": {
+        "url": "https://github.com/ACEsuit/mace-foundations/releases/download/mace_mpa_0/mace-mpa-0-medium.model",
+        "name": "MACE-MPA-0",
+        "description": "Best accuracy for materials. Trained on MPTrj + sAlex datasets.",
+        "speed": "Medium",
+        "best_for": "Highest accuracy, production calculations",
+    },
+}
 
 
-def get_mace_calculator():
-    global _mace_calc
-    if _mace_calc is None:
+def get_mace_calculator(model_id="mace-mp-0a"):
+    global _mace_calculators
+    if model_id not in _mace_calculators:
         from mace.calculators import mace_mp
 
-        _mace_calc = mace_mp(model="small", default_dtype="float32", device="cpu")
-    return _mace_calc
+        model_url = MACE_MODELS.get(model_id, MACE_MODELS["mace-mp-0a"])["url"]
+        _mace_calculators[model_id] = mace_mp(
+            model=model_url, default_dtype="float32", device="cpu"
+        )
+    return _mace_calculators[model_id]
 
 
 def dumps(obj):
@@ -80,9 +107,9 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"redo","description":"Redo the last undone action","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"show_all_bond_lengths","description":"Show bond length labels for ALL bonds in the molecule at once","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"remove_bond_label","description":"Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index"},"atom2":{"type":"integer","description":"Second atom index"},"all":{"type":"boolean","description":"Set true to remove all bond labels"}},"required":[]}}},
-  {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy of the current molecule using MACE machine learning potential. Returns energy in eV and kcal/mol, plus forces on each atom.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames in a multi-frame molecule (e.g., from rotational/translation scan). Returns energy for each frame and identifies lowest/highest energy conformations.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize the molecular geometry to minimize energy using MACE ML potential. Atoms will move to lower-energy positions.","parameters":{"type":"object","properties":{"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05, lower = tighter)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}}}}},
+  {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}}
 ]"""
@@ -211,18 +238,33 @@ When user mentions "bond X,Y" or "bond X-Y", always split first, then use the re
 - calculate_energy: Calculate potential energy using MACE ML potential (returns eV, kcal/mol, forces)
 - optimize_geometry: Geometry optimization to minimize energy. Optional: fmax (convergence, default 0.05), maxSteps (default 100)
 
-=== ENERGY & OPTIMIZATION (MACE ML) ===
-- calculate_energy: Get potential energy of CURRENT frame (eV, kcal/mol) and forces
-- calculate_all_energies: Calculate energy for ALL frames at once. Returns energy per frame and identifies lowest/highest energy conformations. Results are CACHED and saved to file explorer as mace_batch_*.extxyz
-- get_cached_energies: Retrieve cached MACE results WITHOUT recalculating. Use this when plotting or analyzing previously calculated energies. Check state.hasMaceCache first.
-- optimize_geometry: Geometry optimization to minimize energy. Options: fmax (default 0.05), maxSteps (default 100)
-
 **MACE WORKFLOW BEST PRACTICES:**
 - ALWAYS check state.hasMaceCache before recalculating energies
 - If hasMaceCache is true, use get_cached_energies instead of calculate_all_energies
 - When user asks to "plot energy" or "show energy profile" after a calculation, use get_cached_energies
 - MACE results are auto-saved to file explorer as mace_batch_TIMESTAMP.extxyz or mace_energy_TIMESTAMP.extxyz
 - You can read saved MACE files with read_file if needed
+
+=== ENERGY & OPTIMIZATION (MACE ML) ===
+**IMPORTANT: When user requests energy calculation or optimization, ALWAYS ask which MACE model they want to use BEFORE running the calculation, unless they already specified one.**
+
+Available MACE Models:
+1. **mace-mp-0a** - Original foundation model. Fast, good general accuracy. Best for: quick calculations, general materials.
+2. **mace-mp-0b3** - Improved high-pressure stability and reference energies. Best for: high-pressure systems, better energy comparisons.
+3. **mace-mpa-0** - Highest accuracy, trained on MPTrj + sAlex. Best for: production calculations, when accuracy matters most.
+
+When user says "calculate energy" or "optimize", respond with something like:
+"Which MACE model would you like to use?
+- **mace-mp-0a** - Fast, good general accuracy
+- **mace-mp-0b3** - Better for high-pressure, improved references  
+- **mace-mpa-0** - Highest accuracy (recommended for final results)"
+
+Then use their choice in the tool call.
+
+- calculate_energy: Get potential energy of CURRENT frame (requires model parameter)
+- calculate_all_energies: Calculate energy for ALL frames (requires model parameter)
+- optimize_geometry: Geometry optimization (requires model parameter)
+- get_cached_energies: Retrieve cached results WITHOUT recalculating
 
 === INFO ===
 - get_molecule_info: Get atom count, element breakdown, selection status
@@ -408,6 +450,7 @@ def calculate_energy():
     """Calculate single-point energy using MACE-MP"""
     data = request.json
     atoms_data = data.get("atoms", [])
+    model_id = data.get("model", "mace-mp-0a")
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
@@ -417,7 +460,7 @@ def calculate_energy():
         positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
 
         atoms = Atoms(symbols=symbols, positions=positions)
-        atoms.calc = get_mace_calculator()
+        atoms.calc = get_mace_calculator(model_id)
 
         energy = float(atoms.get_potential_energy())
         forces = atoms.get_forces().tolist()
@@ -466,7 +509,8 @@ def optimize_geometry():
         positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
 
         atoms = Atoms(symbols=symbols, positions=positions)
-        atoms.calc = get_mace_calculator()
+        model_id = data.get("model", "mace-mp-0a")
+        atoms.calc = get_mace_calculator(model_id)
 
         # Run optimization
         opt = BFGS(atoms, logfile=None)
@@ -502,7 +546,8 @@ def calculate_energy_batch():
         return jsonify({"error": "No frames provided"}), 400
 
     try:
-        calc = get_mace_calculator()
+        model_id = data.get("model", "mace-mp-0a")
+        calc = get_mace_calculator(model_id)
         results = []
 
         # Create atoms object once from first frame
