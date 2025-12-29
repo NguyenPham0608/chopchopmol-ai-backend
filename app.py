@@ -315,7 +315,7 @@ def chat_stream():
         return jsonify({"error": "API key not set"}), 500
 
     # Cleanup old sessions periodically
-    now = time()
+    now = time.time()
     if len(sessions) > MAX_SESSIONS or len(sessions) % 100 == 0:
         expired = [
             sid for sid, s in sessions.items() if now - s["last_access"] > SESSION_TTL
