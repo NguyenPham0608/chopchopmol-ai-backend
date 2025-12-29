@@ -317,6 +317,16 @@ def chat_stream():
 
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
+    else:
+        # Append tool results to history BEFORE building messages
+        for result in tool_results["results"]:
+            conversationHistory.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": result["tool_call_id"],
+                    "content": result["content"],
+                }
+            )
 
     t_prompt = time.time()
     systemPrompt = build_system_prompt(state)
@@ -331,17 +341,6 @@ def chat_stream():
         f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
         flush=True,
     )
-
-    if tool_results:
-        messages.append(tool_results["assistantMessage"])
-        for result in tool_results["results"]:
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": result["tool_call_id"],
-                    "content": result["content"],
-                }
-            )
 
     def generate():
         t0 = time.time()
@@ -424,6 +423,7 @@ def chat_stream():
                         for tc in tool_calls_data.values()
                     ],
                 }
+                conversationHistory.append(assistant_msg)
                 yield f"data: {dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
             else:
                 if collected_content:
