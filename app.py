@@ -8,6 +8,7 @@ import numpy as np
 from ase import Atoms
 import base64
 from io import BytesIO
+from time import time
 
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
@@ -57,7 +58,9 @@ app = Flask(__name__)
 CORS(app, resources={r"/ai/*": {"origins": "*"}}, supports_credentials=False)
 
 # Store sessions in memory
-sessions = {}
+sessions = {}  # {session_id: {"history": [], "last_access": timestamp}}
+MAX_SESSIONS = 500
+SESSION_TTL = 3600  # 1 hour
 
 # Global OpenAI client - reuses TCP connection
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -311,9 +314,21 @@ def chat_stream():
     if not client.api_key:
         return jsonify({"error": "API key not set"}), 500
 
+    # Cleanup old sessions periodically
+    now = time()
+    if len(sessions) > MAX_SESSIONS or len(sessions) % 100 == 0:
+        expired = [
+            sid for sid, s in sessions.items() if now - s["last_access"] > SESSION_TTL
+        ]
+        for sid in expired:
+            del sessions[sid]
+
     if session_id not in sessions:
-        sessions[session_id] = []
-    conversationHistory = sessions[session_id]
+        sessions[session_id] = {"history": [], "last_access": now}
+    else:
+        sessions[session_id]["last_access"] = now
+
+    conversationHistory = sessions[session_id]["history"]
 
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
@@ -687,10 +702,10 @@ def generate_chart():
 
 @app.route("/ai/clear", methods=["POST"])
 def clear_history():
-    data = request.json
+    data = request.json or {}
     session_id = data.get("sessionId", "default")
     if session_id in sessions:
-        sessions[session_id] = []
+        del sessions[session_id]  # Fully remove, don't just empty
     return jsonify({"success": True})
 
 
