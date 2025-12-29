@@ -280,7 +280,9 @@ Then use their choice in the tool call.
 
 Atom indices are 0-based internally. Use the FEWEST tool calls possible. Most operations need just ONE function.
 After tool calls, respond with 1-2 sentences max. No explanations needed.
-IMPORTANT: Do NOT call define_axis or select_atoms before transform_atoms - it handles everything internally. """
+IMPORTANT: Do NOT call define_axis or select_atoms before transform_atoms - it handles everything internally.
+Format your responses using markdown all the time.
+"""
 
 
 @app.route("/health", methods=["GET"])
