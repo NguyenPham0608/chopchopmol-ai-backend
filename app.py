@@ -350,7 +350,12 @@ def chat_stream():
         flush=True,
     )
 
-    messages = [{"role": "system", "content": systemPrompt}] + conversationHistory[-10:]
+    # Get last 10 messages but ensure we don't start with a tool message
+    history_slice = conversationHistory[-10:]
+    while history_slice and history_slice[0].get("role") == "tool":
+        history_slice = history_slice[1:]
+
+    messages = [{"role": "system", "content": systemPrompt}] + history_slice
     total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
     print(
         f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
