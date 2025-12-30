@@ -366,16 +366,28 @@ def chat_stream():
         t0 = time.time()
         print(f"🚀 Starting OpenAI call...", flush=True)
         try:
-            stream = client.chat.completions.create(
-                model="gpt-5.1",
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                max_completion_tokens=1024,
-                reasoning_effort="low",
-                verbosity="low",
-                stream=True,
-            )
+            # Get model from request (you'll need to pass it from frontend)
+            model = data.get("model", "gpt-5-mini")
+
+            # Model-specific parameters
+            call_params = {
+                "model": model,
+                "messages": messages,
+                "tools": TOOLS,
+                "tool_choice": "auto",
+                "stream": True,
+            }
+
+            # GPT-5.x models support reasoning_effort and verbosity
+            if model.startswith("gpt-5"):
+                call_params["max_completion_tokens"] = 1024
+                call_params["reasoning_effort"] = "low"
+                call_params["verbosity"] = "low"
+            else:
+                # GPT-4.1 models don't support reasoning params
+                call_params["max_tokens"] = 1024
+
+            stream = client.chat.completions.create(**call_params)
 
             print(f"📡 Stream created: {(time.time() - t0) * 1000:.0f}ms", flush=True)
 
