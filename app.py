@@ -226,6 +226,10 @@ Some requests require chaining multiple functions together. Execute them in sequ
 2. Then call rotational_scan(axisAtom1: atom1, axisAtom2: atom2, atomsToMove: fragment2, increment: 10)
    - Use the fragment containing atom2 as atomsToMove
    - Default increment is 10° unless specified
+3. ALWAYS call calculate_all_energies immediately after the scan completes to get the energy profile
+4. Then call create_chart to plot the energy vs rotation angle
+
+**IMPORTANT:** Torsion/rotational scans are meant to show energy barriers. ALWAYS calculate energies for all frames after any rotational_scan or translation_scan, then plot the results. Do not skip this step.
 
 **Examples:**
 - "rotational scan bond 6,7" → split_molecule(atom1:5, atom2:6) then rotational_scan(axisAtom1:5, axisAtom2:6, atomsToMove:[fragment2 atoms], increment:10)
