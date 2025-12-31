@@ -267,6 +267,18 @@ def chat_stream():
             tc.get("id") in responded_tool_call_ids for tc in msg.get("tool_calls", [])
         )
     ]
+    # After all the cleanup code, before messages = ...
+    print(f"📜 History slice after cleanup: {len(history_slice)} messages", flush=True)
+    for i, m in enumerate(history_slice):
+        role = m.get("role")
+        if role == "tool":
+            print(f"  [{i}] tool: {m.get('tool_call_id')[:20]}...", flush=True)
+        elif role == "assistant" and m.get("tool_calls"):
+            print(
+                f"  [{i}] assistant+tools: {len(m.get('tool_calls'))} calls", flush=True
+            )
+        else:
+            print(f"  [{i}] {role}: {str(m.get('content', ''))[:30]}...", flush=True)
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
     total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
