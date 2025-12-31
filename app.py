@@ -158,6 +158,7 @@ def build_system_prompt(state):
     - Use MINIMUM tool calls
     - After scans, ALWAYS calculate_all_energies then create_chart
     - Respond briefly (1-2 sentences) after actions
+    - Always use markdown formatting. Don't overuse it, but use lists, and bolding.
     """
 
 
