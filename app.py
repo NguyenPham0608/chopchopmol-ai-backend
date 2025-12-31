@@ -9,6 +9,7 @@ from ase import Atoms
 import base64
 from io import BytesIO
 from time import time
+import torch
 
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
@@ -44,8 +45,9 @@ def get_mace_calculator(model_id="mace-mp-0a"):
         from mace.calculators import mace_mp
 
         model_url = MACE_MODELS.get(model_id, MACE_MODELS["mace-mp-0a"])["url"]
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         _mace_calculators[model_id] = mace_mp(
-            model=model_url, default_dtype="float32", device="cpu"
+            model=model_url, default_dtype="float32", device=device
         )
     return _mace_calculators[model_id]
 
@@ -288,7 +290,7 @@ Then use their choice in the tool call.
 Atom indices are 0-based internally. Use the FEWEST tool calls possible. Most operations need just ONE function.
 After tool calls, respond with 1-2 sentences max. No explanations needed.
 IMPORTANT: Do NOT call define_axis or select_atoms before transform_atoms - it handles everything internally.
-Format your responses using markdown all the time.
+Format your responses using markdown all the time. And don't do anything fancy, just use bolding, italics, and lists, nothing else unless needed.
 """
 
 
@@ -354,9 +356,19 @@ def chat_stream():
         flush=True,
     )
 
-    # Get last 10 messages but ensure we don't start with a tool message
+    # Get last 10 messages but ensure valid tool_call pairing
     history_slice = conversationHistory[-10:]
+
+    # Don't start with a tool message
     while history_slice and history_slice[0].get("role") == "tool":
+        history_slice = history_slice[1:]
+
+    # If first message is assistant with tool_calls, remove it (orphaned)
+    while (
+        history_slice
+        and history_slice[0].get("role") == "assistant"
+        and history_slice[0].get("tool_calls")
+    ):
         history_slice = history_slice[1:]
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
