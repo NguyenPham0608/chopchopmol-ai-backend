@@ -371,6 +371,20 @@ def chat_stream():
     ):
         history_slice = history_slice[1:]
 
+    # Collect all valid tool_call_ids from assistant messages in slice
+    valid_tool_call_ids = set()
+    for msg in history_slice:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                valid_tool_call_ids.add(tc.get("id"))
+
+    # Remove tool messages with orphaned tool_call_ids
+    history_slice = [
+        msg
+        for msg in history_slice
+        if msg.get("role") != "tool" or msg.get("tool_call_id") in valid_tool_call_ids
+    ]
+
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
     total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
     print(
