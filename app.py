@@ -371,18 +371,34 @@ def chat_stream():
     ):
         history_slice = history_slice[1:]
 
-    # Collect all valid tool_call_ids from assistant messages in slice
+    # Collect all tool_call_ids from assistant messages
     valid_tool_call_ids = set()
     for msg in history_slice:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 valid_tool_call_ids.add(tc.get("id"))
 
-    # Remove tool messages with orphaned tool_call_ids
+    # Collect all tool_call_ids that have responses
+    responded_tool_call_ids = set()
+    for msg in history_slice:
+        if msg.get("role") == "tool":
+            responded_tool_call_ids.add(msg.get("tool_call_id"))
+
+    # Remove orphaned tool messages
     history_slice = [
         msg
         for msg in history_slice
         if msg.get("role") != "tool" or msg.get("tool_call_id") in valid_tool_call_ids
+    ]
+
+    # Remove assistant messages with tool_calls missing responses
+    history_slice = [
+        msg
+        for msg in history_slice
+        if not (msg.get("role") == "assistant" and msg.get("tool_calls"))
+        or all(
+            tc.get("id") in responded_tool_call_ids for tc in msg.get("tool_calls", [])
+        )
     ]
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
