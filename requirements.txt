@@ -1,10 +1,12 @@
+--prefer-binary
+--extra-index-url https://download.pytorch.org/whl/cpu
 Flask==3.1.2
 Flask-CORS==6.0.2
 openai
 httpx==0.28.1
 gunicorn==23.0.0
 orjson
-torch
-mace-torch
+torch==2.7.1+cpu
+mace-torch==0.3.14
 ase
 matplotlib
