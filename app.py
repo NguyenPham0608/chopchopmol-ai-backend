@@ -133,7 +133,9 @@ def build_system_prompt(state):
     - Fragments: {len(state.get('fragments', []))} {dumps(state.get('fragments', []))}
     - Axis: {'atoms ' + str(state.get('axisAtoms', [])[0]) + '-' + str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}
     - Frames: {state.get('frameCount', 0)}{' (current: ' + str(state.get('currentFrame', 0)) + ')' if state.get('frameCount', 0) > 1 else ''}
+    - Frame Energy: {energies if (energies := state.get('frameEnergies', [])) else 'no energies calculated'}
     - MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
+    - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Energy and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
 
     INDEXING: User sees 1-based, you use 0-based. "atom 5" = index 4.
 
@@ -164,7 +166,7 @@ def build_system_prompt(state):
     - Respond briefly (1-2 sentences) after actions
     - Always use markdown formatting. Don't overuse it, but use lists, and bolding.
     - For plotting or saving energy results after a scan: Check STATE for MACE cache. If 'No', call calculate_all_energies first (ask for model if unspecified). If 'Yes', call get_cached_energies to retrieve the data without recalculating.
-    - To plot results (via create_chart): Use energies from calculate_all_energies or get_cached_energies as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps).
+    - To plot results (via create_chart): Use energies from calculate_all_energies or get_cached_energies as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps). If there is nothing in the MACE cache, check Frame Energies in STATE, and if that is empty, prompt the user to calculate energy.
     - To save energy outputs: Get energies via calculate_all_energies or get_cached_energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
     - Follow user instructions in the requested order, but automatically insert prerequisite steps (e.g., energy calculation before plot/save) to handle dependencies—do not fail or ask for clarification if order implies this.
     """
