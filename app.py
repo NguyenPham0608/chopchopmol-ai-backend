@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
+from anthropic import Anthropic
 import os
 import orjson
 import tempfile
@@ -66,6 +67,7 @@ SESSION_TTL = 3600  # 1 hour
 
 # Global OpenAI client - reuses TCP connection
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+claude_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 # Tools schema - exact copy from original buildToolsSchema()
 
@@ -165,6 +167,44 @@ def build_system_prompt(state):
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+def convert_to_claude_messages(history):
+    claude_msgs = []
+    current_user_content = []
+    for msg in history:
+        role = msg["role"]
+        if role == "user":
+            if current_user_content:
+                claude_msgs.append({"role": "user", "content": current_user_content})
+                current_user_content = []
+            claude_msgs.append({"role": "user", "content": msg["content"]})
+        elif role == "assistant":
+            content = []
+            if msg.get("content"):
+                content.append({"type": "text", "text": msg["content"]})
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "input": orjson.loads(tc["function"]["arguments"]),
+                        }
+                    )
+            claude_msgs.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            current_user_content.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": msg["tool_call_id"],
+                    "content": msg["content"],
+                }
+            )
+    if current_user_content:
+        claude_msgs.append({"role": "user", "content": current_user_content})
+    return claude_msgs
 
 
 @app.route("/ai/chat/stream", methods=["POST"])
@@ -292,94 +332,143 @@ def chat_stream():
         t0 = time.time()
         print(f"🚀 Starting OpenAI call...", flush=True)
         try:
-            # Get model from request (you'll need to pass it from frontend)
-            model = data.get("model", "gpt-5-mini")
+            is_claude = "claude" in model.lower()
 
-            # Model-specific parameters
-            call_params = {
-                "model": model,
-                "messages": messages,
-                "tools": TOOLS,
-                "tool_choice": "auto",
-                "stream": True,
-            }
-
-            # GPT-5.x models support reasoning_effort and verbosity
-            if model.startswith("gpt-5"):
-                call_params["max_completion_tokens"] = 1024
-                call_params["reasoning_effort"] = "low"
-                call_params["verbosity"] = "low"
+            if is_claude:
+                if not claude_client:
+                    raise ValueError("ANTHROPIC_API_KEY not set")
+                claude_tools = [
+                    {
+                        "name": t["function"]["name"],
+                        "description": t["function"]["description"],
+                        "input_schema": t["function"]["parameters"],
+                    }
+                    for t in TOOLS
+                ]
+                claude_messages = convert_to_claude_messages(history_slice)
+                call_params = {
+                    "model": model,
+                    "max_tokens": 1024,
+                    "messages": claude_messages,
+                    "system": systemPrompt,
+                    "tools": claude_tools if TOOLS else None,
+                    "stream": True,
+                }
             else:
-                # GPT-4.1 models don't support reasoning params
-                call_params["max_tokens"] = 1024
+                # Original OpenAI params
+                call_params = {
+                    "model": model,
+                    "messages": messages,
+                    "tools": TOOLS,
+                    "tool_choice": "auto",
+                    "stream": True,
+                }
+                if model.startswith("gpt-5"):
+                    call_params["max_completion_tokens"] = 1024
+                    call_params["reasoning_effort"] = "low"
+                    call_params["verbosity"] = "low"
+                else:
+                    call_params["max_tokens"] = 1024
 
-            stream = client.chat.completions.create(**call_params)
+            # Create stream
+            if is_claude:
+                stream = claude_client.messages.create(**call_params)
+            else:
+                stream = client.chat.completions.create(**call_params)
 
             print(f"📡 Stream created: {(time.time() - t0) * 1000:.0f}ms", flush=True)
 
             collected_content = ""
             tool_calls_data = {}
             first_chunk = True
+            current_block_index = None
 
             for chunk in stream:
                 if first_chunk:
                     print(
-                        f"🔥 OpenAI TTFT: {(time.time() - t0) * 1000:.0f}ms", flush=True
+                        f"🔥 OpenAI/Claude TTFT: {(time.time() - t0) * 1000:.0f}ms",
+                        flush=True,
                     )
                     first_chunk = False
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if not delta:
-                    continue
 
-                if delta.content:
-                    collected_content += delta.content
-                    yield f"data: {dumps({'type': 'text', 'content': delta.content})}\n\n"
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls_data:
-                            tool_calls_data[idx] = {
-                                "id": "",
-                                "name": "",
+                if is_claude:
+                    if chunk.type == "content_block_start":
+                        current_block_index = chunk.index
+                        if chunk.content_block.type == "text":
+                            tool_calls_data[current_block_index] = {
+                                "type": "text",
+                                "text": "",
+                            }
+                        elif chunk.content_block.type == "tool_use":
+                            tool_calls_data[current_block_index] = {
+                                "id": chunk.content_block.id,
+                                "name": chunk.content_block.name,
                                 "arguments": "",
                             }
-                        if tc.id:
-                            tool_calls_data[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_data[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls_data[idx][
+                    elif chunk.type == "content_block_delta":
+                        if chunk.delta.type == "text_delta":
+                            text = chunk.delta.text
+                            collected_content += text
+                            yield f"data: {dumps({'type': 'text', 'content': text})}\n\n"
+                        elif chunk.delta.type == "input_json_delta":
+                            partial_json = chunk.delta.partial_json
+                            if current_block_index in tool_calls_data:
+                                tool_calls_data[current_block_index][
                                     "arguments"
-                                ] += tc.function.arguments
+                                ] += partial_json
+                    elif chunk.type == "ping":
+                        continue
+                else:
+                    # Original OpenAI chunk processing
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if not delta:
+                        continue
+                    if delta.content:
+                        collected_content += delta.content
+                        yield f"data: {dumps({'type': 'text', 'content': delta.content})}\n\n"
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_data:
+                                tool_calls_data[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc.id:
+                                tool_calls_data[idx]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls_data[idx]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_calls_data[idx][
+                                        "arguments"
+                                    ] += tc.function.arguments
 
             print(
                 f"✅ Stream complete: {len(collected_content)} chars, total: {(time.time() - t0) * 1000:.0f}ms",
                 flush=True,
             )
 
+            # Post-stream processing (shared)
             if tool_calls_data:
-                tool_calls = [
-                    {
-                        "id": tc["id"],
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                    }
-                    for tc in tool_calls_data.values()
-                ]
+                tool_calls = []
+                for tc in tool_calls_data.values():
+                    if "id" in tc:
+                        tool_calls.append(
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": tc["arguments"],
+                                },
+                            }
+                        )
                 assistant_msg = {
                     "role": "assistant",
                     "content": collected_content,
-                    "tool_calls": [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": tc["arguments"],
-                            },
-                        }
-                        for tc in tool_calls_data.values()
-                    ],
+                    "tool_calls": tool_calls,  # Adapted to OpenAI-style for history
                 }
                 conversationHistory.append(assistant_msg)
                 yield f"data: {dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
