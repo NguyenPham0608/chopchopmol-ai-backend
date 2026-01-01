@@ -213,6 +213,41 @@ def convert_to_claude_messages(history):
     return claude_msgs
 
 
+def repair_claude_history_for_tool_pairing(history):
+    """
+    Ensures that every assistant message with tool_use is immediately followed
+    by corresponding tool_result blocks in the Claude message format.
+    Inserts missing tool_result blocks if necessary.
+    """
+    repaired = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        repaired.append(msg)
+
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tool_ids = {tc["id"] for tc in msg["tool_calls"]}
+            # Check if the next messages provide all results
+            provided_ids = set()
+            j = i + 1
+            while j < len(history) and history[j].get("role") == "tool":
+                provided_ids.add(history[j].get("tool_call_id"))
+                j += 1
+            missing = tool_ids - provided_ids
+            if missing:
+                # Insert dummy tool_result blocks for missing IDs
+                for mid in missing:
+                    repaired.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": mid,
+                            "content": "Missing tool result (reconstructed for Claude compatibility)",
+                        }
+                    )
+        i += 1
+    return repaired
+
+
 @app.route("/ai/chat/stream", methods=["POST"])
 def chat_stream():
     import time
@@ -389,7 +424,9 @@ def chat_stream():
                     }
                     for t in TOOLS
                 ]
-                claude_messages = convert_to_claude_messages(history_slice)
+                # Repair history specifically for Claude's strict pairing requirement
+                repaired_history = repair_claude_history_for_tool_pairing(history_slice)
+                claude_messages = convert_to_claude_messages(repaired_history)
                 call_params = {
                     "model": model,
                     "max_tokens": 16384,
