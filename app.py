@@ -153,7 +153,9 @@ def build_system_prompt(state):
     KEY WORKFLOWS:
     1. Torsion scan on bond X,Y: split_molecule(X-1, Y-1) → rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, atomsToMove=fragment2, increment=10) → calculate_all_energies → create_chart
     2. transform_atoms: pass axisAtom1, axisAtom2, atomsToMove, and angle OR distance. Don't call define_axis first.
-
+    2. Torsion scan with plot (any order): rotational_scan → calculate_all_energies (or get_cached_energies if cache exists) → create_chart(x=angles, y=energies)
+    3. Torsion scan with save (any order): rotational_scan → calculate_all_energies (or get_cached_energies) → create_file(filename="glucose_calc.json", content=JSON.dumps(energies))
+    4. Torsion scan with both plot and save (any order): rotational_scan → calculate_all_energies → create_chart → get_cached_energies → create_file (reuse cache to avoid redundant calculations)
     MACE MODELS (ask if not specified): mace-mp-0a (fast), mace-mp-0b3 (high-pressure), mace-mpa-0 (best accuracy)
 
     RULES:
@@ -161,6 +163,10 @@ def build_system_prompt(state):
     - After scans, ALWAYS calculate_all_energies then create_chart
     - Respond briefly (1-2 sentences) after actions
     - Always use markdown formatting. Don't overuse it, but use lists, and bolding.
+    - For plotting or saving energy results after a scan: Check STATE for MACE cache. If 'No', call calculate_all_energies first (ask for model if unspecified). If 'Yes', call get_cached_energies to retrieve the data without recalculating.
+    - To plot results (via create_chart): Use energies from calculate_all_energies or get_cached_energies as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps).
+    - To save energy outputs: Get energies via calculate_all_energies or get_cached_energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
+    - Follow user instructions in the requested order, but automatically insert prerequisite steps (e.g., energy calculation before plot/save) to handle dependencies—do not fail or ask for clarification if order implies this.
     """
 
 
@@ -247,7 +253,7 @@ def chat_stream():
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
     else:
-        # Append tool results to history BEFORE building messages
+        # Append actual tool results
         for result in tool_results["results"]:
             conversationHistory.append(
                 {
@@ -257,6 +263,52 @@ def chat_stream():
                 }
             )
 
+            # === UPDATED SAFETY RECONSTRUCTION ===
+        # Ensure the immediate previous message to the tool results is an assistant with matching tool_calls.
+        # If not (e.g., due to history corruption, truncation, or ordering issues), reconstruct it.
+        if conversationHistory and conversationHistory[-1]["role"] == "tool":
+            # Count consecutive tool messages at the end (these are the ones just appended)
+            num_tools = 0
+            for i in range(len(conversationHistory) - 1, -1, -1):
+                if conversationHistory[i]["role"] == "tool":
+                    num_tools += 1
+                else:
+                    break
+            first_tool_idx = len(conversationHistory) - num_tools
+
+            reconstruct = True
+            if first_tool_idx > 0:
+                prev_msg = conversationHistory[first_tool_idx - 1]
+                if prev_msg["role"] == "assistant" and prev_msg.get("tool_calls"):
+                    assistant_tc_ids = {tc["id"] for tc in prev_msg["tool_calls"]}
+                    tool_tc_ids = {
+                        conversationHistory[j]["tool_call_id"]
+                        for j in range(first_tool_idx, len(conversationHistory))
+                    }
+                    if tool_tc_ids.issubset(assistant_tc_ids):
+                        reconstruct = False  # Already correctly paired
+
+            if reconstruct:
+                # Collect tool_call_ids in the exact order of the tool messages
+                tool_ids = [
+                    conversationHistory[j]["tool_call_id"]
+                    for j in range(first_tool_idx, len(conversationHistory))
+                ]
+                reconstructed_tool_calls = [
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {"name": "reconstructed_tool", "arguments": "{}"},
+                    }
+                    for tc_id in tool_ids
+                ]
+                reconstructed_assistant = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": reconstructed_tool_calls,
+                }
+                # Insert immediately before the tools
+                conversationHistory.insert(first_tool_idx, reconstructed_assistant)
     t_prompt = time.time()
     systemPrompt = build_system_prompt(state)
     print(
@@ -264,62 +316,16 @@ def chat_stream():
         flush=True,
     )
 
-    # Get last 10 messages but ensure valid tool_call pairing
-    history_slice = conversationHistory[-10:]
+    # === SIMPLIFIED & SAFE HISTORY SLICING ===
+    # After the reconstruction above, we can safely just take recent messages
+    max_history_messages = 30  # Safe upper limit; includes user/assistant/tool messages
+    history_slice = conversationHistory[-max_history_messages:]
 
-    # Don't start with a tool message
+    # Only minor safeguard: never start the slice with an orphaned tool message
     while history_slice and history_slice[0].get("role") == "tool":
         history_slice = history_slice[1:]
 
-    # If first message is assistant with tool_calls, remove it (orphaned)
-    while (
-        history_slice
-        and history_slice[0].get("role") == "assistant"
-        and history_slice[0].get("tool_calls")
-    ):
-        history_slice = history_slice[1:]
-
-    # Collect all tool_call_ids from assistant messages
-    valid_tool_call_ids = set()
-    for msg in history_slice:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                valid_tool_call_ids.add(tc.get("id"))
-
-    # Collect all tool_call_ids that have responses
-    responded_tool_call_ids = set()
-    for msg in history_slice:
-        if msg.get("role") == "tool":
-            responded_tool_call_ids.add(msg.get("tool_call_id"))
-
-    # Remove orphaned tool messages
-    history_slice = [
-        msg
-        for msg in history_slice
-        if msg.get("role") != "tool" or msg.get("tool_call_id") in valid_tool_call_ids
-    ]
-
-    # Remove assistant messages with tool_calls missing responses
-    history_slice = [
-        msg
-        for msg in history_slice
-        if not (msg.get("role") == "assistant" and msg.get("tool_calls"))
-        or all(
-            tc.get("id") in responded_tool_call_ids for tc in msg.get("tool_calls", [])
-        )
-    ]
-    # After all the cleanup code, before messages = ...
-    print(f"📜 History slice after cleanup: {len(history_slice)} messages", flush=True)
-    for i, m in enumerate(history_slice):
-        role = m.get("role")
-        if role == "tool":
-            print(f"  [{i}] tool: {m.get('tool_call_id')[:20]}...", flush=True)
-        elif role == "assistant" and m.get("tool_calls"):
-            print(
-                f"  [{i}] assistant+tools: {len(m.get('tool_calls'))} calls", flush=True
-            )
-        else:
-            print(f"  [{i}] {role}: {str(m.get('content', ''))[:30]}...", flush=True)
+    print(f"📜 Final history slice: {len(history_slice)} messages", flush=True)
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
     total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
@@ -348,7 +354,7 @@ def chat_stream():
                 claude_messages = convert_to_claude_messages(history_slice)
                 call_params = {
                     "model": model,
-                    "max_tokens": 1024,
+                    "max_tokens": 16384,
                     "messages": claude_messages,
                     "system": systemPrompt,
                     "tools": claude_tools if TOOLS else None,
@@ -364,11 +370,11 @@ def chat_stream():
                     "stream": True,
                 }
                 if model.startswith("gpt-5"):
-                    call_params["max_completion_tokens"] = 1024
+                    call_params["max_completion_tokens"] = 16384
                     call_params["reasoning_effort"] = "low"
                     call_params["verbosity"] = "low"
                 else:
-                    call_params["max_tokens"] = 1024
+                    call_params["max_tokens"] = 16384
 
             # Create stream
             if is_claude:
