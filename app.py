@@ -178,25 +178,40 @@ def health():
 def convert_to_claude_messages(history):
     claude_msgs = []
     current_user_content = []
+
     for msg in history:
         role = msg["role"]
+
+        # 1. Before adding a User or Assistant message, FLUSH pending tool results
+        if role in ["user", "assistant"] and current_user_content:
+            claude_msgs.append({"role": "user", "content": current_user_content})
+            current_user_content = []
+
         if role == "user":
-            if current_user_content:
-                claude_msgs.append({"role": "user", "content": current_user_content})
-                current_user_content = []
             claude_msgs.append({"role": "user", "content": msg["content"]})
+
         elif role == "assistant":
             content = []
             if msg.get("content"):
                 content.append({"type": "text", "text": msg["content"]})
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
+                    # FIX: Handle empty argument strings safely
+                    args_str = tc["function"]["arguments"]
+                    if not args_str:
+                        tool_input = {}
+                    else:
+                        try:
+                            tool_input = orjson.loads(args_str)
+                        except:
+                            tool_input = {}  # Fallback if JSON is malformed
+
                     content.append(
                         {
                             "type": "tool_use",
                             "id": tc["id"],
                             "name": tc["function"]["name"],
-                            "input": orjson.loads(tc["function"]["arguments"]),
+                            "input": tool_input,
                         }
                     )
             claude_msgs.append({"role": "assistant", "content": content})
@@ -208,8 +223,11 @@ def convert_to_claude_messages(history):
                     "content": msg["content"],
                 }
             )
+
+    # 2. Flush any remaining tool results at the end
     if current_user_content:
         claude_msgs.append({"role": "user", "content": current_user_content})
+
     return claude_msgs
 
 
@@ -227,23 +245,31 @@ def repair_claude_history_for_tool_pairing(history):
 
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             tool_ids = {tc["id"] for tc in msg["tool_calls"]}
-            # Check if the next messages provide all results
+
+            # Look ahead for tool messages
             provided_ids = set()
             j = i + 1
             while j < len(history) and history[j].get("role") == "tool":
                 provided_ids.add(history[j].get("tool_call_id"))
                 j += 1
+
+            # Calculate missing IDs
             missing = tool_ids - provided_ids
+
+            # CRITICAL FIX: If we are at the end of history and have tools,
+            # we MUST provide results (dummies) or Claude throws 400.
+            # This happens if the user prompt caused a tool call but the frontend
+            # hasn't executed it yet, or if history slicing cut off the results.
             if missing:
-                # Insert dummy tool_result blocks for missing IDs
                 for mid in missing:
                     repaired.append(
                         {
                             "role": "tool",
                             "tool_call_id": mid,
-                            "content": "Missing tool result (reconstructed for Claude compatibility)",
+                            "content": "Tool result missing (placeholder to satisfy API pairing requirement).",
                         }
                     )
+
         i += 1
     return repaired
 
