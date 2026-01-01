@@ -429,7 +429,7 @@ def chat_stream():
                 claude_messages = convert_to_claude_messages(repaired_history)
                 call_params = {
                     "model": model,
-                    "max_tokens": 16384,
+                    "max_tokens": 8192,
                     "messages": claude_messages,
                     "system": systemPrompt,
                     "tools": claude_tools if TOOLS else None,
