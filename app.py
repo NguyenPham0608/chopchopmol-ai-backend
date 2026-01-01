@@ -316,19 +316,57 @@ def chat_stream():
         flush=True,
     )
 
-    # === SIMPLIFIED & SAFE HISTORY SLICING ===
-    # After the reconstruction above, we can safely just take recent messages
-    max_history_messages = 30  # Safe upper limit; includes user/assistant/tool messages
+    # === ROBUST HISTORY PREPARATION WITH PAIRING GUARANTEE ===
+    # Take recent history
+    max_history_messages = 50  # Increased for safety in multi-turn tool flows
     history_slice = conversationHistory[-max_history_messages:]
 
-    # Only minor safeguard: never start the slice with an orphaned tool message
+    # Remove leading orphaned tool messages (shouldn't happen, but safe)
     while history_slice and history_slice[0].get("role") == "tool":
         history_slice = history_slice[1:]
 
-    print(f"📜 Final history slice: {len(history_slice)} messages", flush=True)
+    # === FINAL SAFETY: Ensure every assistant with tool_calls has matching tool responses ===
+    # This runs on EVERY request, not just when tool_results is present
+    i = 0
+    while i < len(history_slice) - 1:
+        msg = history_slice[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            assistant_tc_ids = {tc["id"] for tc in msg["tool_calls"]}
+            # Look at all following messages until next assistant/user
+            following_tool_ids = set()
+            j = i + 1
+            while j < len(history_slice) and history_slice[j].get("role") == "tool":
+                following_tool_ids.add(history_slice[j].get("tool_call_id"))
+                j += 1
+            missing_ids = assistant_tc_ids - following_tool_ids
+            if missing_ids:
+                # Reconstruct missing tool responses as errors (or empty) to satisfy validation
+                for mid in missing_ids:
+                    history_slice.insert(
+                        j,
+                        {
+                            "role": "tool",
+                            "tool_call_id": mid,
+                            "content": "Error: Tool execution result missing (possibly from previous session). Assuming success for continuation.",
+                        },
+                    )
+                # Optional: also reconstruct assistant if completely missing — but usually not needed
+        i += 1
+
+    print(
+        f"📜 Final history slice after pairing fix: {len(history_slice)} messages",
+        flush=True,
+    )
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
-    total_tokens_est = sum(len(m.get("content", "")) // 4 for m in messages)
+
+    # Safe token estimation (fix for None content)
+    total_tokens_est = sum(len(str(m.get("content") or "")) // 4 for m in messages)
+    print(
+        f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
+        flush=True,
+    )
+    total_tokens_est = sum(len(str(m.get("content") or "")) // 4 for m in messages)
     print(
         f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
         flush=True,
