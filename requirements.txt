@@ -1,6 +1,7 @@
 Flask==3.1.2
 Flask-CORS==6.0.2
 openai
+anthropic
 httpx==0.28.1
 gunicorn==23.0.0
 orjson
