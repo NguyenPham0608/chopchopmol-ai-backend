@@ -514,6 +514,8 @@ def chat_stream():
                                 "name": chunk.content_block.name,
                                 "arguments": "",
                             }
+                            # Send immediate tool status for Claude
+                            yield f"data: {dumps({'type': 'tool_status', 'toolName': chunk.content_block.name})}\n\n"
                     elif chunk.type == "content_block_delta":
                         if chunk.delta.type == "text_delta":
                             text = chunk.delta.text
