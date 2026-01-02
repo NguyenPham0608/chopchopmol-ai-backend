@@ -140,7 +140,7 @@ def build_system_prompt(state):
     - Powered by {str(state.get('aiModel', 'ChopChopMol'))} AI
     - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Energy and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
 
-    INDEXING: User sees 1-based, you use 0-based. "atom 5" = index 4.
+    INDEXING: User sees 1-based, you use 0-based. If the user says"atom 5" internally, you use/see index 4.
 
     TOOLS:
     Selection: select_atoms, clear_selection, select_all_atoms, select_atoms_by_element, select_connected
