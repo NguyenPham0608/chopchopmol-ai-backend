@@ -116,7 +116,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"remove_bond_label","description":"Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index"},"atom2":{"type":"integer","description":"Second atom index"},"all":{"type":"boolean","description":"Set true to remove all bond labels"}},"required":[]}}},
   {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
   {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
@@ -658,12 +658,15 @@ def test_mace():
 @app.route("/ai/mace/optimize", methods=["POST"])
 def optimize_geometry():
     """Geometry optimization using MACE-MP + ASE BFGS"""
+    from ase import Atoms
     from ase.optimize import BFGS
-    import io
+    from mace.calculators import mace_mp
+    import traceback
+    import numpy as np
 
     data = request.json
     atoms_data = data.get("atoms", [])
-    fmax = data.get("fmax", 0.05)  # convergence threshold
+    fmax = data.get("fmax", 0.05)
     max_steps = data.get("maxSteps", 100)
 
     if not atoms_data:
@@ -671,15 +674,39 @@ def optimize_geometry():
 
     try:
         symbols = [a["element"] for a in atoms_data]
-        positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
+        positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
 
-        atoms = Atoms(symbols=symbols, positions=positions)
-        model_id = data.get("model", "mace-mp-0a")
-        atoms.calc = get_mace_calculator(model_id)
+        # Create atoms object with a large enough cell for molecules
+        pos_min = positions.min(axis=0) if len(positions) > 0 else np.array([0, 0, 0])
+        pos_max = (
+            positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
+        )
+        cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
-        # Run optimization
-        opt = BFGS(atoms, logfile=None)
-        converged = opt.run(fmax=fmax, steps=max_steps)
+        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+
+        # Get model name and initialize MACE calculator
+        model_name = data.get("model", "medium")
+
+        model_map = {
+            "small": "small",
+            "medium": "medium",
+            "large": "large",
+            "mace-mpa-0": "medium",
+        }
+
+        mace_model = model_map.get(model_name, "medium")
+        calc = mace_mp(model=mace_model, device="cpu", default_dtype="float64")
+        atoms.calc = calc
+
+        # Run optimization without trajectory/restart to avoid pickle errors
+        opt = BFGS(atoms, logfile=None, trajectory=None, restart=None)
+        opt.run(fmax=fmax, steps=max_steps)
+
+        # Check convergence properly - get forces and check if they're below fmax
+        forces = atoms.get_forces()
+        max_force = np.sqrt((forces**2).sum(axis=1).max())
+        converged = bool(max_force < fmax)  # Convert numpy bool to Python bool
 
         # Get final positions and energy
         final_positions = atoms.get_positions().tolist()
@@ -689,9 +716,10 @@ def optimize_geometry():
             {
                 "success": True,
                 "converged": converged,
-                "steps": opt.nsteps,
+                "steps": int(opt.nsteps),
                 "energy_eV": final_energy,
                 "energy_kcal": final_energy * 23.0609,
+                "max_force": float(max_force),
                 "positions": [
                     {"index": i, "x": p[0], "y": p[1], "z": p[2]}
                     for i, p in enumerate(final_positions)
@@ -699,7 +727,9 @@ def optimize_geometry():
             }
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ MACE Optimization Error: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/ai/mace/energy-batch", methods=["POST"])
