@@ -699,14 +699,29 @@ def optimize_geometry():
         calc = mace_mp(model=mace_model, device="cpu", default_dtype="float64")
         atoms.calc = calc
 
-        # Run optimization without trajectory/restart to avoid pickle errors
+        # Store trajectory frames
+        trajectory_frames = []
+
+        def observer():
+            """Callback to capture each optimization step"""
+            pos = atoms.get_positions().copy()
+            energy = float(atoms.get_potential_energy())
+            forces = atoms.get_forces()
+            max_force = float(np.sqrt((forces**2).sum(axis=1).max()))
+
+            trajectory_frames.append(
+                {"positions": pos.tolist(), "energy_eV": energy, "max_force": max_force}
+            )
+
+        # Run optimization with observer to capture frames
         opt = BFGS(atoms, logfile=None, trajectory=None, restart=None)
+        opt.attach(observer, interval=1)  # Call observer after each step
         opt.run(fmax=fmax, steps=max_steps)
 
-        # Check convergence properly - get forces and check if they're below fmax
+        # Final convergence check
         forces = atoms.get_forces()
         max_force = np.sqrt((forces**2).sum(axis=1).max())
-        converged = bool(max_force < fmax)  # Convert numpy bool to Python bool
+        converged = bool(max_force < fmax)
 
         # Get final positions and energy
         final_positions = atoms.get_positions().tolist()
@@ -724,6 +739,7 @@ def optimize_geometry():
                     {"index": i, "x": p[0], "y": p[1], "z": p[2]}
                     for i, p in enumerate(final_positions)
                 ],
+                "trajectory": trajectory_frames,  # All intermediate frames
             }
         )
     except Exception as e:
