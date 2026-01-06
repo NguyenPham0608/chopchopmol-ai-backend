@@ -159,9 +159,10 @@ def build_system_prompt(state):
     KEY WORKFLOWS:
     1. Torsion scan on bond X,Y: split_molecule(X-1, Y-1) → rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, atomsToMove=fragment2, increment=10) → calculate_all_energies → create_chart
     2. transform_atoms: pass axisAtom1, axisAtom2, atomsToMove, and angle OR distance. Don't call define_axis first.
-    2. Torsion scan with plot (any order): rotational_scan → calculate_all_energies (or get_cached_energies if cache exists) → create_chart(x=angles, y=energies)
-    3. Torsion scan with save (any order): rotational_scan → calculate_all_energies (or get_cached_energies) → create_file(filename="glucose_calc.json", content=JSON.dumps(energies))
-    4. Torsion scan with both plot and save (any order): rotational_scan → calculate_all_energies → create_chart → get_cached_energies → create_file (reuse cache to avoid redundant calculations)
+    3. Geometry optimization with plot: optimize_geometry → get_cached_energies → create_chart(x=step indices, y=energies)
+    4. Torsion scan with plot (any order): rotational_scan → calculate_all_energies (or get_cached_energies if cache exists) → create_chart(x=angles, y=energies)
+    5. Torsion scan with save (any order): rotational_scan → calculate_all_energies (or get_cached_energies) → create_file(filename="glucose_calc.json", content=JSON.dumps(energies))
+    6. Torsion scan with both plot and save (any order): rotational_scan → calculate_all_energies → create_chart → get_cached_energies → create_file (reuse cache to avoid redundant calculations)
     MACE MODELS (ask if not specified): mace-mp-0a (fast), mace-mp-0b3 (high-pressure), mace-mpa-0 (best accuracy)
 
     RULES:
@@ -174,6 +175,7 @@ def build_system_prompt(state):
     - To save energy outputs: Get energies via calculate_all_energies or get_cached_energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
     - Follow user instructions in the requested order, but automatically insert prerequisite steps (e.g., energy calculation before plot/save) to handle dependencies—do not fail or ask for clarification if order implies this.
     - When doing mace calculations, ALWAYS confirm with the user with what model they want to use. No exceptions.
+    - After optimize_geometry, ALWAYS get_cached_energies then create_chart (energies already calculated during optimization)
     """
 
 
