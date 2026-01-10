@@ -117,6 +117,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
   {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
   {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"run_md","description":"Run molecular dynamics (MD) simulation using MACE ML potential with Langevin thermostat (NVT ensemble). Generates trajectory frames that can be played with frame slider. IMPORTANT: Ask user for temperature and model if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate)"},"temperature":{"type":"number","description":"Temperature in Kelvin (default: 300)"},"steps":{"type":"integer","description":"Number of MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in femtoseconds (default: 1.0)"},"friction":{"type":"number","description":"Langevin friction coefficient in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save frame every N steps (default: 10)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
@@ -154,6 +155,7 @@ def build_system_prompt(state):
     View: reset_camera, zoom_to_fit, rotate_camera, toggle_labels, toggle_ribbon, set_style
     Files: save_image, save_xyz, load_molecule, create_file, edit_file, read_file, list_folder_files
     Info: get_molecule_info, get_atom_info, get_bonded_atoms
+    MD: run_md (NVT Langevin dynamics)
     Other: undo, redo, create_chart
 
     KEY WORKFLOWS:
@@ -163,6 +165,7 @@ def build_system_prompt(state):
     4. Torsion scan with plot (any order): rotational_scan → calculate_all_energies (or get_cached_energies if cache exists) → create_chart(x=angles, y=energies)
     5. Torsion scan with save (any order): rotational_scan → calculate_all_energies (or get_cached_energies) → create_file(filename="glucose_calc.json", content=JSON.dumps(energies))
     6. Torsion scan with both plot and save (any order): rotational_scan → calculate_all_energies → create_chart → get_cached_energies → create_file (reuse cache to avoid redundant calculations)
+    7. MD simulation with plot: run_md(temperature=300, steps=500) → get_cached_energies → create_chart(x=time steps, y=energies or temperature)
     MACE MODELS (ask if not specified): mace-mp-0a (fast), mace-mp-0b3 (high-pressure), mace-mpa-0 (best accuracy)
 
     RULES:
@@ -804,6 +807,123 @@ def calculate_energy_batch():
     except Exception as e:
         print(f"MACE batch error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/mace/md", methods=["POST"])
+def run_molecular_dynamics():
+    """Run NVT molecular dynamics using MACE-MP + ASE Langevin"""
+    from ase import Atoms, units
+    from ase.md.langevin import Langevin
+    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+    from mace.calculators import mace_mp
+    import traceback
+    import numpy as np
+
+    data = request.json
+    atoms_data = data.get("atoms", [])
+    temperature_K = data.get("temperature", 300)  # Kelvin
+    timestep_fs = data.get("timestep", 1.0)  # femtoseconds
+    n_steps = data.get("steps", 500)
+    friction = data.get("friction", 0.01)  # 1/fs
+    save_interval = data.get("saveInterval", 10)  # Save every N steps
+
+    if not atoms_data:
+        return jsonify({"error": "No atoms provided"}), 400
+
+    try:
+        symbols = [a["element"] for a in atoms_data]
+        positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
+
+        # Create atoms object
+        pos_min = positions.min(axis=0) if len(positions) > 0 else np.array([0, 0, 0])
+        pos_max = (
+            positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
+        )
+        cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
+
+        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+
+        # Initialize MACE calculator
+        model_name = data.get("model", "medium")
+        model_map = {
+            "small": "small",
+            "medium": "medium",
+            "large": "large",
+            "mace-mpa-0": "medium",
+        }
+        mace_model = model_map.get(model_name, "medium")
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        calc = mace_mp(model=mace_model, device=device, default_dtype="float64")
+        atoms.calc = calc
+
+        # Initialize velocities from Maxwell-Boltzmann distribution
+        MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
+
+        # Store trajectory frames
+        trajectory_frames = []
+
+        def observer():
+            """Capture frame at each save interval"""
+            pos = atoms.get_positions().copy()
+            vel = atoms.get_velocities()
+            energy = float(atoms.get_potential_energy())
+            kinetic = float(atoms.get_kinetic_energy())
+            temp = float(kinetic / (1.5 * len(atoms) * units.kB))
+
+            trajectory_frames.append(
+                {
+                    "positions": pos.tolist(),
+                    "energy_eV": energy,
+                    "kinetic_eV": kinetic,
+                    "total_eV": energy + kinetic,
+                    "temperature_K": temp,
+                    "step": len(trajectory_frames) * save_interval,
+                }
+            )
+
+        # Set up Langevin dynamics (NVT)
+        dyn = Langevin(
+            atoms,
+            timestep=timestep_fs * units.fs,
+            temperature_K=temperature_K,
+            friction=friction / units.fs,
+        )
+
+        # Attach observer
+        dyn.attach(observer, interval=save_interval)
+
+        # Capture initial frame
+        observer()
+
+        # Run MD
+        dyn.run(n_steps)
+
+        # Final state
+        final_positions = atoms.get_positions().tolist()
+        final_energy = float(atoms.get_potential_energy())
+
+        return jsonify(
+            {
+                "success": True,
+                "steps": n_steps,
+                "temperature_K": temperature_K,
+                "timestep_fs": timestep_fs,
+                "energy_eV": final_energy,
+                "energy_kcal": final_energy * 23.0609,
+                "frameCount": len(trajectory_frames),
+                "positions": [
+                    {"index": i, "x": p[0], "y": p[1], "z": p[2]}
+                    for i, p in enumerate(final_positions)
+                ],
+                "trajectory": trajectory_frames,
+            }
+        )
+
+    except Exception as e:
+        print(f"❌ MACE MD Error: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/ai/chart", methods=["POST"])
