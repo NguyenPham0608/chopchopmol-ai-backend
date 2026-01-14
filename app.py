@@ -114,15 +114,16 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"redo","description":"Redo the last undone action","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"show_all_bond_lengths","description":"Show bond length labels for ALL bonds in the molecule at once","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"remove_bond_label","description":"Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index"},"atom2":{"type":"integer","description":"Second atom index"},"all":{"type":"boolean","description":"Set true to remove all bond labels"}},"required":[]}}},
-  {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"run_md","description":"Run molecular dynamics (MD) simulation using MACE ML potential with Langevin thermostat (NVT ensemble). Generates trajectory frames that can be played with frame slider. IMPORTANT: Ask user for temperature and model if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate)"},"temperature":{"type":"number","description":"Temperature in Kelvin (default: 300)"},"steps":{"type":"integer","description":"Number of MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in femtoseconds (default: 1.0)"},"friction":{"type":"number","description":"Langevin friction coefficient in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save frame every N steps (default: 10)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"includeForces":{"type":"boolean","description":"Include per-atom forces in result (default: false). Only set true if forces are needed for visualization or analysis."}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"includeForces":{"type":"boolean","description":"Include per-atom forces for each frame (default: false). Only set true if forces are needed."}},"required":["model"]}}},
+  {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
+  {"type":"function","function":{"name":"run_md","description":"Run molecular dynamics (MD) simulation using MACE ML potential with Langevin thermostat (NVT ensemble). Generates trajectory frames that can be played with frame slider. IMPORTANT: Ask user for temperature and model if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate)"},"temperature":{"type":"number","description":"Temperature in Kelvin (default: 300)"},"steps":{"type":"integer","description":"Number of MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in femtoseconds (default: 1.0)"},"friction":{"type":"number","description":"Langevin friction coefficient in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save frame every N steps (default: 10)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
   {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"set_angle","description":"Set the bond angle between 3 selected atoms to a specific value. Select exactly 3 atoms in order: A-B-C where B is the vertex atom. Rotates the fragment on atom A's side.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target angle in degrees (0-180)"}},"required":["angle"]}}},
-  {"type":"function","function":{"name":"angle_scan","description":"Perform an angle scan: rotate a fragment around an axis perpendicular to the plane formed by 3 atoms through a range of angles. B is the pivot point.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index (0-indexed)"},"atom2":{"type":"integer","description":"Vertex/pivot atom index (0-indexed)"},"atom3":{"type":"integer","description":"Third atom index (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed)"},"increment":{"type":"number","description":"Step size in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["atom1","atom2","atom3"]}}}
+  {"type":"function","function":{"name":"angle_scan","description":"Perform an angle scan: rotate a fragment around an axis perpendicular to the plane formed by 3 atoms through a range of angles. B is the pivot point.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index (0-indexed)"},"atom2":{"type":"integer","description":"Vertex/pivot atom index (0-indexed)"},"atom3":{"type":"integer","description":"Third atom index (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed)"},"increment":{"type":"number","description":"Step size in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["atom1","atom2","atom3"]}}},
+  {"type":"function","function":{"name":"toggle_force_arrows","description":"Toggle visualization of force vectors on atoms. Shows arrows indicating direction and magnitude of forces from the last energy calculation. Green=low force, red=high force. Requires energy calculation first.","parameters":{"type":"object","properties":{}}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -621,6 +622,7 @@ def calculate_energy():
     data = request.json
     atoms_data = data.get("atoms", [])
     model_id = data.get("model", "mace-mp-0a")
+    include_forces = data.get("includeForces", False)
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
@@ -633,17 +635,19 @@ def calculate_energy():
         atoms.calc = get_mace_calculator(model_id)
 
         energy = float(atoms.get_potential_energy())
-        forces = atoms.get_forces().tolist()
 
-        return jsonify(
-            {
-                "success": True,
-                "energy_eV": energy,
-                "energy_kcal": energy * 23.0609,  # eV to kcal/mol
-                "forces": forces,
-                "max_force": float(np.max(np.abs(forces))),
-            }
-        )
+        result = {
+            "success": True,
+            "energy_eV": energy,
+            "energy_kcal": energy * 23.0609,  # eV to kcal/mol
+        }
+
+        if include_forces:
+            forces = atoms.get_forces().tolist()
+            result["forces"] = forces
+            result["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
+
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -673,6 +677,7 @@ def optimize_geometry():
     atoms_data = data.get("atoms", [])
     fmax = data.get("fmax", 0.05)
     max_steps = data.get("maxSteps", 100)
+    include_forces = data.get("includeForces", False)
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
@@ -714,9 +719,15 @@ def optimize_geometry():
             forces = atoms.get_forces()
             max_force = float(np.sqrt((forces**2).sum(axis=1).max()))
 
-            trajectory_frames.append(
-                {"positions": pos.tolist(), "energy_eV": energy, "max_force": max_force}
-            )
+            frame_data = {
+                "positions": pos.tolist(),
+                "energy_eV": energy,
+                "max_force": max_force,
+            }
+            if include_forces:
+                frame_data["forces"] = forces.tolist()
+
+            trajectory_frames.append(frame_data)
 
         # Run optimization with observer to capture frames
         opt = BFGS(atoms, logfile=None, trajectory=None, restart=None)
@@ -732,21 +743,24 @@ def optimize_geometry():
         final_positions = atoms.get_positions().tolist()
         final_energy = float(atoms.get_potential_energy())
 
-        return jsonify(
-            {
-                "success": True,
-                "converged": converged,
-                "steps": int(opt.nsteps),
-                "energy_eV": final_energy,
-                "energy_kcal": final_energy * 23.0609,
-                "max_force": float(max_force),
-                "positions": [
-                    {"index": i, "x": p[0], "y": p[1], "z": p[2]}
-                    for i, p in enumerate(final_positions)
-                ],
-                "trajectory": trajectory_frames,  # All intermediate frames
-            }
-        )
+        result = {
+            "success": True,
+            "converged": converged,
+            "steps": int(opt.nsteps),
+            "energy_eV": final_energy,
+            "energy_kcal": final_energy * 23.0609,
+            "max_force": float(max_force),
+            "positions": [
+                {"index": i, "x": p[0], "y": p[1], "z": p[2]}
+                for i, p in enumerate(final_positions)
+            ],
+            "trajectory": trajectory_frames,  # All intermediate frames
+        }
+
+        if include_forces:
+            result["forces"] = forces.tolist()
+
+        return jsonify(result)
     except Exception as e:
         print(f"❌ MACE Optimization Error: {str(e)}")
         traceback.print_exc()
@@ -781,14 +795,15 @@ def calculate_energy_batch():
             forces = atoms.get_forces()
             max_force = float(np.max(np.linalg.norm(forces, axis=1)))
 
-            results.append(
-                {
-                    "frame": i,
-                    "energy_eV": round(energy, 6),
-                    "energy_kcal": round(energy * 23.0609, 4),
-                    "max_force_eV_A": round(max_force, 6),
-                }
-            )
+            frame_result = {
+                "frame": i,
+                "energy_eV": round(energy, 6),
+                "energy_kcal": round(energy * 23.0609, 4),
+                "max_force_eV_A": round(max_force, 6),
+            }
+            if data.get("includeForces", False):
+                frame_result["forces"] = forces.tolist()
+            results.append(frame_result)
 
         energies = [r["energy_eV"] for r in results]
         min_idx = int(np.argmin(energies))
@@ -826,6 +841,7 @@ def run_molecular_dynamics():
     n_steps = data.get("steps", 500)
     friction = data.get("friction", 0.01)  # 1/fs
     save_interval = data.get("saveInterval", 10)  # Save every N steps
+    include_forces = data.get("includeForces", False)
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
@@ -871,16 +887,21 @@ def run_molecular_dynamics():
             kinetic = float(atoms.get_kinetic_energy())
             temp = float(kinetic / (1.5 * len(atoms) * units.kB))
 
-            trajectory_frames.append(
-                {
-                    "positions": pos.tolist(),
-                    "energy_eV": energy,
-                    "kinetic_eV": kinetic,
-                    "total_eV": energy + kinetic,
-                    "temperature_K": temp,
-                    "step": len(trajectory_frames) * save_interval,
-                }
-            )
+            frame_data = {
+                "positions": pos.tolist(),
+                "energy_eV": energy,
+                "kinetic_eV": kinetic,
+                "total_eV": energy + kinetic,
+                "temperature_K": temp,
+                "step": len(trajectory_frames) * save_interval,
+            }
+
+            if include_forces:
+                forces = atoms.get_forces()
+                frame_data["forces"] = forces.tolist()
+                frame_data["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
+
+            trajectory_frames.append(frame_data)
 
         # Set up Langevin dynamics (NVT)
         dyn = Langevin(
@@ -903,22 +924,27 @@ def run_molecular_dynamics():
         final_positions = atoms.get_positions().tolist()
         final_energy = float(atoms.get_potential_energy())
 
-        return jsonify(
-            {
-                "success": True,
-                "steps": n_steps,
-                "temperature_K": temperature_K,
-                "timestep_fs": timestep_fs,
-                "energy_eV": final_energy,
-                "energy_kcal": final_energy * 23.0609,
-                "frameCount": len(trajectory_frames),
-                "positions": [
-                    {"index": i, "x": p[0], "y": p[1], "z": p[2]}
-                    for i, p in enumerate(final_positions)
-                ],
-                "trajectory": trajectory_frames,
-            }
-        )
+        result = {
+            "success": True,
+            "steps": n_steps,
+            "temperature_K": temperature_K,
+            "timestep_fs": timestep_fs,
+            "energy_eV": final_energy,
+            "energy_kcal": final_energy * 23.0609,
+            "frameCount": len(trajectory_frames),
+            "positions": [
+                {"index": i, "x": p[0], "y": p[1], "z": p[2]}
+                for i, p in enumerate(final_positions)
+            ],
+            "trajectory": trajectory_frames,
+        }
+
+        if include_forces:
+            forces = atoms.get_forces()
+            result["forces"] = forces.tolist()
+            result["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
+
+        return jsonify(result)
 
     except Exception as e:
         print(f"❌ MACE MD Error: {str(e)}")
