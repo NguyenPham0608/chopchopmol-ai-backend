@@ -138,11 +138,13 @@ def build_system_prompt(state):
     - Fragments: {len(state.get('fragments', []))} {dumps(state.get('fragments', []))}
     - Axis: {'atoms ' + str(state.get('axisAtoms', [])[0]) + '-' + str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}
     - Frames: {state.get('frameCount', 0)}{' (current: ' + str(state.get('currentFrame', 0)) + ')' if state.get('frameCount', 0) > 1 else ''}
-    - Frame Energy: {energies if (energies := state.get('frameEnergies', [])) else 'no energies calculated'}
+    - Frame Energies: {'Available (' + str(len(state.get('energies', []))) + ' frames)' if state.get('hasEnergies') else 'Not available'}
+    - Forces: {'Available on atoms' if state.get('hasForces') else 'Not available'}
+    - Metadata: {'Available (' + ('lattice, ' if state.get('frameMetadata') and any(m and 'lattice' in m for m in state.get('frameMetadata', [])) else '') + ('virial, ' if state.get('frameMetadata') and any(m and 'virial' in m for m in state.get('frameMetadata', [])) else '') + ('stress' if state.get('frameMetadata') and any(m and 'stress' in m for m in state.get('frameMetadata', [])) else '').rstrip(', ') + ')' if state.get('hasMetadata') else 'Not available'}
     - MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
     - Powered by {str(state.get('aiModel', 'ChopChopMol'))} AI
     - Current working file name: {str(state.get('currentFileName', 'No file loaded'))} If you ever don't have enough info on the molecule from all the other things, you can look in the file with the function read_file for more info.
-    - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Energy and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
+    - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Frame Energies and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
 
     INDEXING: User sees 1-based, you use 0-based. If the user says"atom 5" internally, you use/see index 4.
 
@@ -170,14 +172,21 @@ def build_system_prompt(state):
     7. MD simulation with plot: run_md(temperature=300, steps=500) → get_cached_energies → create_chart(x=time steps, y=energies or temperature)
     MACE MODELS (ask if not specified): mace-mp-0a (fast), mace-mp-0b3 (high-pressure), mace-mpa-0 (best accuracy)
 
+    DATA ACCESS:
+    - Frame energies: Available via state.energies array (one value per frame) if hasEnergies=true. Each frame also has state.frames[i].energy.
+    - Forces: Available per-atom in state.frames[i].atoms[j].fx/fy/fz if hasForces=true. Can be used for force analysis or visualization.
+    - Metadata: Available in state.frames[i].metadata if hasMetadata=true. May contain lattice, virial, stress, pbc, etc. from .extxyz files.
+    - All frame data includes full atom coordinates and properties for analysis.
+
     RULES:
     - Use MINIMUM tool calls
     - After scans, ALWAYS calculate_all_energies then create_chart
     - Respond briefly (1-2 sentences) after actions
     - Always use markdown formatting. Don't overuse it, but use lists, and bolding.
     - For plotting or saving energy results after a scan: Check STATE for MACE cache. If 'No', call calculate_all_energies first (ask for model if unspecified). If 'Yes', call get_cached_energies to retrieve the data without recalculating.
-    - To plot results (via create_chart): Use energies from calculate_all_energies or get_cached_energies as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps). If there is nothing in the MACE cache, check Frame Energies in STATE, and if that is empty, prompt the user to calculate energy. Make the labels energy and frame index.
-    - To save energy outputs: Get energies via calculate_all_energies or get_cached_energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
+    - To plot results (via create_chart): Use energies from calculate_all_energies, get_cached_energies, OR state.energies (if hasEnergies=true) as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps). If there is nothing in the MACE cache, check Frame Energies in STATE, and if that is empty, prompt the user to calculate energy. Make the labels energy and frame index.
+    - To save energy outputs: Get energies via calculate_all_energies, get_cached_energies, OR state.energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
+    - Force analysis: If user asks about forces, check hasForces first. If true, access state.frames[i].atoms[j].fx/fy/fz. If false, suggest running energy calculation with includeForces=true.
     - Follow user instructions in the requested order, but automatically insert prerequisite steps (e.g., energy calculation before plot/save) to handle dependencies—do not fail or ask for clarification if order implies this.
     - When doing mace calculations, ALWAYS confirm with the user with what model they want to use. No exceptions.
     - After optimize_geometry, ALWAYS get_cached_energies then create_chart (energies already calculated during optimization)
