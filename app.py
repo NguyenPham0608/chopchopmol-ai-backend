@@ -141,6 +141,7 @@ def build_system_prompt(state):
     - Frame Energy: {energies if (energies := state.get('frameEnergies', [])) else 'no energies calculated'}
     - MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
     - Powered by {str(state.get('aiModel', 'ChopChopMol'))} AI
+    - Current working file name: {str(state.get('currentFileName', 'No file loaded'))} If you ever don't have enough info on the molecule from all the other things, you can look in the file with the function read_file for more info.
     - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Energy and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
 
     INDEXING: User sees 1-based, you use 0-based. If the user says"atom 5" internally, you use/see index 4.
