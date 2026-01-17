@@ -65,6 +65,10 @@ sessions = {}  # {session_id: {"history": [], "last_access": timestamp}}
 MAX_SESSIONS = 500
 SESSION_TTL = 3600  # 1 hour
 
+# Prompt cache for speed optimization
+prompt_cache = {}  # {state_hash: prompt_string}
+MAX_PROMPT_CACHE = 1000
+
 # Global OpenAI client - reuses TCP connection
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 claude_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -128,6 +132,28 @@ TOOLS_JSON = """[
 
 TOOLS = orjson.loads(TOOLS_JSON)
 
+
+def hash_state(state):
+    """Create a hash of the state for caching"""
+    import hashlib
+    # Only hash the parts that affect the prompt
+    key_parts = [
+        state.get('hasAtoms', False),
+        state.get('atomCount', 0),
+        state.get('selectedCount', 0),
+        tuple(state.get('selectedIndices', [])),
+        len(state.get('fragments', [])),
+        state.get('hasAxis', False),
+        tuple(state.get('axisAtoms', [])) if state.get('hasAxis') else (),
+        state.get('frameCount', 0),
+        state.get('currentFrame', 0),
+        state.get('hasEnergies', False),
+        state.get('hasForces', False),
+        state.get('hasMaceCache', False),
+        state.get('maceFrameCount', 0),
+        state.get('currentFileName', ''),
+    ]
+    return hashlib.md5(str(key_parts).encode()).hexdigest()
 
 def build_system_prompt(state):
     return f"""You are ChopChopMol's AI assistant. Execute commands immediately - don't ask clarifying questions if the user provided enough info.
@@ -394,11 +420,22 @@ def chat_stream():
                 # Insert immediately before the tools
                 conversationHistory.insert(first_tool_idx, reconstructed_assistant)
     t_prompt = time.time()
-    systemPrompt = build_system_prompt(state)
-    print(
-        f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
-        flush=True,
-    )
+
+    # Use cached prompt if available
+    state_hash = hash_state(state)
+    if state_hash in prompt_cache:
+        systemPrompt = prompt_cache[state_hash]
+        print(f"⚡ Using cached prompt (hash: {state_hash[:8]})", flush=True)
+    else:
+        systemPrompt = build_system_prompt(state)
+        prompt_cache[state_hash] = systemPrompt
+        # Limit cache size
+        if len(prompt_cache) > MAX_PROMPT_CACHE:
+            prompt_cache.pop(next(iter(prompt_cache)))
+        print(
+            f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
+            flush=True,
+        )
 
     # === ROBUST HISTORY PREPARATION WITH PAIRING GUARANTEE ===
     # Take recent history
@@ -480,7 +517,13 @@ def chat_stream():
                     "model": model,
                     "max_tokens": 8192,
                     "messages": claude_messages,
-                    "system": systemPrompt,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": systemPrompt,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ],
                     "tools": claude_tools if TOOLS else None,
                     "stream": True,
                 }
