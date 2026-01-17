@@ -78,7 +78,7 @@ claude_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 TOOLS_JSON = """[
   {"type":"function","function":{"name":"create_file","description":"Create a new file in the open folder. AI can later edit files it creates.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename with extension (e.g., 'molecule.xyz', 'notes.txt')"},"content":{"type":"string","description":"File content"}},"required":["filename"]}}},
   {"type":"function","function":{"name":"edit_file","description":"Edit a file that the AI previously created. Cannot edit user's original files.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename to edit"},"content":{"type":"string","description":"New file content"}},"required":["filename","content"]}}},
-  {"type":"function","function":{"name":"split_molecule","description":"Split a molecule into two fragments by breaking the bond between two atoms. The two atoms must be bonded. If the atoms are part of a ring (cycle), splitting is not possible.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"Index of the first atom (0-based)"},"atom2":{"type":"integer","description":"Index of the second atom (0-based). Must be bonded to atom1."}},"required":["atom1","atom2"]}}},
+  {"type":"function","function":{"name":"split_molecule","description":"Split a molecule into two fragments by breaking the bond between two atoms. Returns fragment1 (atoms on atom1 side) and fragment2 (atoms on atom2 side) with their atom indices. Use the SMALLER fragment for rotational_scan atomsToMove parameter.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"Index of the first atom (0-based)"},"atom2":{"type":"integer","description":"Index of the second atom (0-based). Must be bonded to atom1."}},"required":["atom1","atom2"]}}},
   {"type":"function","function":{"name":"read_file","description":"Read contents of a file in the open folder","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename to read"}},"required":["filename"]}}},
   {"type":"function","function":{"name":"list_folder_files","description":"List all files in the currently open folder","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"select_atoms","description":"Select atoms by their indices. Use this before any transformation.","parameters":{"type":"object","properties":{"indices":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to select"},"add":{"type":"boolean","description":"If true, add to current selection; if false, replace selection"}},"required":["indices"]}}},
@@ -92,7 +92,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"remove_axis","description":"Remove the currently defined axis","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"transform_atoms","description":"Rotate or translate atoms around an axis defined by two atoms. Use this for ALL rotation and translation requests.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the axis (0-indexed)"},"axisAtom2":{"type":"integer","description":"Second atom index defining the axis (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to transform (0-indexed)"},"angle":{"type":"number","description":"Rotation angle in degrees (use this OR distance, not both)"},"distance":{"type":"number","description":"Translation distance in angstroms (use this OR angle, not both)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"change_atom_element","description":"Change the element type of selected atoms (e.g., change Carbon to Nitrogen)","parameters":{"type":"object","properties":{"element":{"type":"string","description":"New element symbol (e.g., 'C', 'N', 'O', 'H', 'S', 'P')"}},"required":["element"]}}},
-  {"type":"function","function":{"name":"rotational_scan","description":"Perform a rotational scan: rotate a fragment around an axis in increments, generating frames that can be played with the frame slider. Useful for conformational analysis.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the rotation axis (0-indexed)"},"axisAtom2":{"type":"integer","description":"Second atom index defining the rotation axis (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed). Typically a fragment."},"increment":{"type":"number","description":"Rotation increment in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
+  {"type":"function","function":{"name":"rotational_scan","description":"Perform a torsion/dihedral scan: rotate atoms around a bond axis in increments, generating frames. For torsion scans: (1) split_molecule first to get fragments, (2) use the SMALLER fragment as atomsToMove, (3) use the bond atoms as axis. Always followed by calculate_all_energies and create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the rotation axis (0-indexed). This is one of the bond atoms."},"axisAtom2":{"type":"integer","description":"Second atom index defining the rotation axis (0-indexed). This is the other bond atom."},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed). For torsion scans, use the SMALLER fragment from split_molecule result."},"increment":{"type":"number","description":"Rotation increment in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"remove_atoms","description":"Delete the currently selected atoms from the molecule","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_distance","description":"Measure and display the distance between 2 atoms. Select exactly 2 atoms first.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_angle","description":"Measure and display the angle between 3 atoms. Select exactly 3 atoms (middle atom is vertex).","parameters":{"type":"object","properties":{}}}},
@@ -119,10 +119,10 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"show_all_bond_lengths","description":"Show bond length labels for ALL bonds in the molecule at once","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"remove_bond_label","description":"Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index"},"atom2":{"type":"integer","description":"Second atom index"},"all":{"type":"boolean","description":"Set true to remove all bond labels"}},"required":[]}}},
   {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"includeForces":{"type":"boolean","description":"Include per-atom forces in result (default: false). Only set true if forces are needed for visualization or analysis."}},"required":["model"]}}},
-  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"includeForces":{"type":"boolean","description":"Include per-atom forces for each frame (default: false). Only set true if forces are needed."}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE ML potential. REQUIRED after rotational_scan, translation_scan, or angle_scan. Returns energy data that must be plotted with create_chart. CRITICAL: Always ask user which model to use (mace-mp-0a=fast, mace-mp-0b3=high-pressure, mace-mpa-0=most accurate). Never assume model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model: mace-mp-0a (fastest), mace-mp-0b3 (high-pressure systems), mace-mpa-0 (best accuracy)"},"includeForces":{"type":"boolean","description":"Include per-atom forces for each frame (default: false). Only set true if forces are needed."}},"required":["model"]}}},
   {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
   {"type":"function","function":{"name":"run_md","description":"Run molecular dynamics (MD) simulation using MACE ML potential with Langevin thermostat (NVT ensemble). Generates trajectory frames that can be played with frame slider. IMPORTANT: Ask user for temperature and model if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate)"},"temperature":{"type":"number","description":"Temperature in Kelvin (default: 300)"},"steps":{"type":"integer","description":"Number of MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in femtoseconds (default: 1.0)"},"friction":{"type":"number","description":"Langevin friction coefficient in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save frame every N steps (default: 10)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
-  {"type":"function","function":{"name":"create_chart","description":"Create a chart/graph to visualize data. The chart will be displayed in the chat. Use for energy profiles, scan results, or any numerical data.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
+  {"type":"function","function":{"name":"create_chart","description":"Create and display an energy plot. REQUIRED after calculate_all_energies to visualize scan results. For torsion scans: x=[0,10,20,...,360] (angles), y=energies from calculate_all_energies, xLabel='Dihedral Angle (degrees)', yLabel='Energy (kcal/mol)'. For optimization: x=[0,1,2,...] (step numbers), y=energies, xLabel='Step', yLabel='Energy (kcal/mol)'.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type: use 'line' for scans and optimization (default: line)"},"title":{"type":"string","description":"Chart title: e.g., 'Torsion Scan' or 'Geometry Optimization'"},"xLabel":{"type":"string","description":"X-axis label: e.g., 'Dihedral Angle (degrees)' for torsion, 'Step' for optimization"},"yLabel":{"type":"string","description":"Y-axis label: usually 'Energy (kcal/mol)' or 'Energy (eV)'"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values: angles for torsion scan [0,10,20,...,360], step numbers for optimization [0,1,2,...]"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values: energies from calculate_all_energies result"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"set_angle","description":"Set the bond angle between 3 selected atoms to a specific value. Select exactly 3 atoms in order: A-B-C where B is the vertex atom. Rotates the fragment on atom A's side.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target angle in degrees (0-180)"}},"required":["angle"]}}},
@@ -156,67 +156,110 @@ def hash_state(state):
     return hashlib.md5(str(key_parts).encode()).hexdigest()
 
 def build_system_prompt(state):
-    return f"""You are ChopChopMol's AI assistant. Execute commands immediately - don't ask clarifying questions if the user provided enough info.
+    return f"""You are ChopChopMol's AI assistant. Execute commands immediately.
 
-    STATE:
-    - Molecule: {str(state.get('atomCount', 0)) + ' atoms' if state.get('hasAtoms') else 'None'}
-    - Selected: {state.get('selectedCount', 0)} atoms {('[' + ','.join(map(str, state.get('selectedIndices', []))) + ']') if state.get('selectedCount', 0) > 0 else ''}
-    - Fragments: {len(state.get('fragments', []))} {dumps(state.get('fragments', []))}
-    - Axis: {'atoms ' + str(state.get('axisAtoms', [])[0]) + '-' + str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}
-    - Frames: {state.get('frameCount', 0)}{' (current: ' + str(state.get('currentFrame', 0)) + ')' if state.get('frameCount', 0) > 1 else ''}
-    - Frame Energies: {'Available (' + str(len(state.get('energies', []))) + ' frames)' if state.get('hasEnergies') else 'Not available'}
-    - Forces: {'Available on atoms' if state.get('hasForces') else 'Not available'}
-    - Metadata: {'Available (' + ('lattice, ' if state.get('frameMetadata') and any(m and 'lattice' in m for m in state.get('frameMetadata', [])) else '') + ('virial, ' if state.get('frameMetadata') and any(m and 'virial' in m for m in state.get('frameMetadata', [])) else '') + ('stress' if state.get('frameMetadata') and any(m and 'stress' in m for m in state.get('frameMetadata', [])) else '').rstrip(', ') + ')' if state.get('hasMetadata') else 'Not available'}
-    - MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
-    - Powered by {str(state.get('aiModel', 'ChopChopMol'))} AI
-    - Current working file name: {str(state.get('currentFileName', 'No file loaded'))} If you ever don't have enough info on the molecule from all the other things, you can look in the file with the function read_file for more info.
-    - Prioritize current Frame energy array over MACE cache or use one if another is not available. If both are available, use Frame Energies and if none are available, prompt the user to calculate energy. However we don't want to prompt the user to calculate energy if one of the energy sources exists.
+STATE:
+- Molecule: {str(state.get('atomCount', 0)) + ' atoms' if state.get('hasAtoms') else 'None'}
+- Selected: {state.get('selectedCount', 0)} atoms {('[' + ','.join(map(str, state.get('selectedIndices', []))) + ']') if state.get('selectedCount', 0) > 0 else ''}
+- Fragments: {len(state.get('fragments', []))} {dumps(state.get('fragments', []))}
+- Axis: {'atoms ' + str(state.get('axisAtoms', [])[0]) + '-' + str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}
+- Frames: {state.get('frameCount', 0)}{' (current: ' + str(state.get('currentFrame', 0)) + ')' if state.get('frameCount', 0) > 1 else ''}
+- Frame Energies: {'Available' if state.get('hasEnergies') else 'Not available'}
+- Forces: {'Available' if state.get('hasForces') else 'Not available'}
+- MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
 
-    INDEXING: User sees 1-based, you use 0-based. If the user says"atom 5" internally, you use/see index 4.
+CRITICAL: User sees 1-based atom numbers, but you MUST use 0-based indices.
+Example: User says "atom 5" → you use index 4 in tool calls.
 
-    TOOLS:
-    Selection: select_atoms, clear_selection, select_all_atoms, select_atoms_by_element, select_connected
-    Editing: add_atom, change_atom_element, remove_atoms, set_bond_distance, set_dihedral_angle, add_hydrogens
-    Transform: transform_atoms (handles axis+move in ONE call), define_axis, remove_axis
-    Measure: measure_distance, measure_angle, measure_dihedral, clear_measurements, show_all_bond_lengths, remove_bond_label, set_angle
-    Scans: rotational_scan, translation_scan, angle_scan - all generate frames
-    Fragments: create_fragment, isolate_selection, split_molecule (breaks bond into 2 fragments)
-    Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies (use if hasMaceCache=true)
-    View: reset_camera, zoom_to_fit, rotate_camera, toggle_labels, toggle_ribbon, set_style
-    Files: save_image, save_file (xyz/extxyz/mol/pdb/pqr/gro/mol2 formats with auto forces/energies), load_molecule, create_file, edit_file, read_file, list_folder_files
-    Info: get_molecule_info, get_atom_info, get_bonded_atoms
-    MD: run_md (NVT Langevin dynamics)
-    Other: undo, redo, create_chart
+=== TORSION/DIHEDRAL SCAN WORKFLOW ===
+When user asks to scan a torsion angle or dihedral on bond between atoms X and Y:
 
-    KEY WORKFLOWS:
-    1. Torsion scan on bond X,Y: split_molecule(X-1, Y-1) → rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, atomsToMove=fragment2, increment=10) → calculate_all_energies → create_chart
-    2. transform_atoms: pass axisAtom1, axisAtom2, atomsToMove, and angle OR distance. Don't call define_axis first.
-    3. Geometry optimization with plot: optimize_geometry → get_cached_energies → create_chart(x=step indices, y=energies)
-    4. Torsion scan with plot (any order): rotational_scan → calculate_all_energies (or get_cached_energies if cache exists) → create_chart(x=angles, y=energies)
-    5. Torsion scan with save (any order): rotational_scan → calculate_all_energies (or get_cached_energies) → create_file(filename="glucose_calc.json", content=JSON.dumps(energies))
-    6. Torsion scan with both plot and save (any order): rotational_scan → calculate_all_energies → create_chart → get_cached_energies → create_file (reuse cache to avoid redundant calculations)
-    7. MD simulation with plot: run_md(temperature=300, steps=500) → get_cached_energies → create_chart(x=time steps, y=energies or temperature)
-    MACE MODELS (ask if not specified): mace-mp-0a (fast), mace-mp-0b3 (high-pressure), mace-mpa-0 (best accuracy)
+Step 1: Split the molecule
+- Call split_molecule with atom1=X-1, atom2=Y-1 (convert to 0-based!)
+- This breaks the bond and creates two fragments
+- The split_molecule tool returns which atoms are in each fragment
 
-    DATA ACCESS:
-    - Frame energies: Available via state.energies array (one value per frame) if hasEnergies=true. Each frame also has state.frames[i].energy.
-    - Forces: Available per-atom in state.frames[i].atoms[j].fx/fy/fz if hasForces=true. Can be used for force analysis or visualization.
-    - Metadata: Available in state.frames[i].metadata if hasMetadata=true. May contain lattice, virial, stress, pbc, etc. from .extxyz files.
-    - All frame data includes full atom coordinates and properties for analysis.
+Step 2: Identify which fragment to rotate
+- Look at the split_molecule result
+- It tells you fragment1 atoms and fragment2 atoms
+- IMPORTANT: Choose the SMALLER fragment to rotate (fewer atoms)
+- If fragments are equal size, use fragment2
 
-    RULES:
-    - Use MINIMUM tool calls
-    - After scans, ALWAYS calculate_all_energies then create_chart
-    - Respond briefly (1-2 sentences) after actions
-    - Always use markdown formatting. Don't overuse it, but use lists, and bolding.
-    - For plotting or saving energy results after a scan: Check STATE for MACE cache. If 'No', call calculate_all_energies first (ask for model if unspecified). If 'Yes', call get_cached_energies to retrieve the data without recalculating.
-    - To plot results (via create_chart): Use energies from calculate_all_energies, get_cached_energies, OR state.energies (if hasEnergies=true) as y-values; generate x-values based on the scan parameters (e.g., for torsion scan, angles from 0 to 360 in 'increment' steps). If there is nothing in the MACE cache, check Frame Energies in STATE, and if that is empty, prompt the user to calculate energy. Make the labels energy and frame index.
-    - To save energy outputs: Get energies via calculate_all_energies, get_cached_energies, OR state.energies, then call create_file with the filename and content as JSON.dumps of the energy data (include frame indices, energies in eV and kcal, etc.).
-    - Force analysis: If user asks about forces, check hasForces first. If true, access state.frames[i].atoms[j].fx/fy/fz. If false, suggest running energy calculation with includeForces=true.
-    - Follow user instructions in the requested order, but automatically insert prerequisite steps (e.g., energy calculation before plot/save) to handle dependencies—do not fail or ask for clarification if order implies this.
-    - When doing mace calculations, ALWAYS confirm with the user with what model they want to use. No exceptions.
-    - After optimize_geometry, ALWAYS get_cached_energies then create_chart (energies already calculated during optimization)
-    """
+Step 3: Call rotational_scan
+- Use axisAtom1=X-1, axisAtom2=Y-1 (the bond atoms, 0-based)
+- Use atomsToMove=<the atoms from the smaller fragment>
+- Use increment=10 (or user's value)
+- Use startAngle=0, endAngle=360 (default)
+
+Step 4: Calculate energies
+- Call calculate_all_energies with model (ask user if not specified)
+- This calculates energy for each rotation frame
+
+Step 5: Plot the results
+- Call create_chart with:
+  - x = [0, 10, 20, 30, ..., 360] (the rotation angles)
+  - y = energies from calculate_all_energies
+  - title = "Torsion Scan"
+  - xLabel = "Dihedral Angle (degrees)"
+  - yLabel = "Energy (kcal/mol)"
+
+EXAMPLE: "Do a torsion scan on bond between atoms 5 and 6"
+1. split_molecule(atom1=4, atom2=5)  ← Note: 0-based!
+2. Look at result: fragment1=[0,1,2,3,4], fragment2=[5,6,7,8]
+3. fragment1 has 5 atoms, fragment2 has 4 atoms → use fragment2
+4. rotational_scan(axisAtom1=4, axisAtom2=5, atomsToMove=[5,6,7,8], increment=10)
+5. calculate_all_energies(model="mace-mp-0a")
+6. create_chart(x=[0,10,20,...,360], y=energies, title="Torsion Scan")
+
+=== WHICH FRAGMENT TO ROTATE ===
+ALWAYS rotate the SMALLER fragment (fewer atoms). Why?
+- More efficient computation
+- Standard convention in chemistry
+- If you rotate the larger fragment, the results are the same but slower
+
+=== OTHER COMMON WORKFLOWS ===
+
+Geometry optimization:
+1. optimize_geometry(model=<ask user>)
+2. get_cached_energies()
+3. create_chart(x=step_indices, y=energies)
+
+Translation scan (bond dissociation):
+1. split_molecule(atom1, atom2)
+2. translation_scan(axisAtom1, axisAtom2, atomsToMove=<smaller fragment>)
+3. calculate_all_energies
+4. create_chart
+
+Rotate specific atoms:
+1. transform_atoms(axisAtom1, axisAtom2, atomsToMove=[...], angle=90)
+   Note: Don't call define_axis separately - transform_atoms handles it
+
+=== TOOLS AVAILABLE ===
+Selection: select_atoms, select_all_atoms, select_atoms_by_element, clear_selection
+Editing: add_atom, remove_atoms, change_atom_element, add_hydrogens
+Transform: transform_atoms (rotation/translation in one call)
+Measure: measure_distance, measure_angle, measure_dihedral
+Scans: rotational_scan, translation_scan, angle_scan
+Fragments: split_molecule (breaks bond, returns fragment info)
+Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies
+View: reset_camera, zoom_to_fit, toggle_labels, set_style
+Files: save_file, load_molecule, create_file, read_file
+Info: get_molecule_info, get_atom_info, get_bonded_atoms
+Other: undo, redo, create_chart
+
+=== RULES ===
+1. Use MINIMUM tool calls - combine when possible
+2. After scans, ALWAYS: calculate_all_energies → create_chart
+3. For MACE calculations, ALWAYS ask user which model (mace-mp-0a, mace-mp-0b3, mace-mpa-0)
+4. After optimize_geometry, use get_cached_energies (energies already calculated)
+5. Respond briefly (1-2 sentences max) after actions
+6. Use markdown: **bold** for emphasis, lists for steps
+7. If MACE cache exists, use get_cached_energies instead of recalculating
+
+=== ENERGY DATA ACCESS ===
+- If hasEnergies=true: Use state.energies array
+- If hasMaceCache=true: Use get_cached_energies()
+- Otherwise: Must call calculate_all_energies first"""
 
 
 @app.route("/health", methods=["GET"])
