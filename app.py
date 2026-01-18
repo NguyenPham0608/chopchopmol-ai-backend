@@ -58,7 +58,11 @@ def dumps(obj):
 
 
 app = Flask(__name__)
-CORS(app, resources={r"/ai/*": {"origins": "*"}}, supports_credentials=False)
+CORS(
+    app,
+    resources={r"/ai/*": {"origins": "*"}, r"/api/*": {"origins": "*"}},
+    supports_credentials=False,
+)
 
 # Store sessions in memory
 sessions = {}  # {session_id: {"history": [], "last_access": timestamp}}
@@ -78,7 +82,7 @@ claude_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 TOOLS_JSON = """[
   {"type":"function","function":{"name":"create_file","description":"Create a new file in the open folder. AI can later edit files it creates.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename with extension (e.g., 'molecule.xyz', 'notes.txt')"},"content":{"type":"string","description":"File content"}},"required":["filename"]}}},
   {"type":"function","function":{"name":"edit_file","description":"Edit a file that the AI previously created. Cannot edit user's original files.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename to edit"},"content":{"type":"string","description":"New file content"}},"required":["filename","content"]}}},
-  {"type":"function","function":{"name":"split_molecule","description":"Split a molecule into two fragments by breaking the bond between two atoms. Returns fragment1 (atoms on atom1 side) and fragment2 (atoms on atom2 side) with their atom indices. Use the SMALLER fragment for rotational_scan atomsToMove parameter.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"Index of the first atom (0-based)"},"atom2":{"type":"integer","description":"Index of the second atom (0-based). Must be bonded to atom1."}},"required":["atom1","atom2"]}}},
+  {"type":"function","function":{"name":"split_molecule","description":"Split molecule by breaking bond. Returns fragments with atom indices. Use SMALLER fragment for rotational_scan.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index (0-based)"},"atom2":{"type":"integer","description":"Second atom index (0-based, bonded to atom1)"}},"required":["atom1","atom2"]}}},
   {"type":"function","function":{"name":"read_file","description":"Read contents of a file in the open folder","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename to read"}},"required":["filename"]}}},
   {"type":"function","function":{"name":"list_folder_files","description":"List all files in the currently open folder","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"select_atoms","description":"Select atoms by their indices. Use this before any transformation.","parameters":{"type":"object","properties":{"indices":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to select"},"add":{"type":"boolean","description":"If true, add to current selection; if false, replace selection"}},"required":["indices"]}}},
@@ -92,7 +96,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"remove_axis","description":"Remove the currently defined axis","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"transform_atoms","description":"Rotate or translate atoms around an axis defined by two atoms. Use this for ALL rotation and translation requests.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the axis (0-indexed)"},"axisAtom2":{"type":"integer","description":"Second atom index defining the axis (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to transform (0-indexed)"},"angle":{"type":"number","description":"Rotation angle in degrees (use this OR distance, not both)"},"distance":{"type":"number","description":"Translation distance in angstroms (use this OR angle, not both)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"change_atom_element","description":"Change the element type of selected atoms (e.g., change Carbon to Nitrogen)","parameters":{"type":"object","properties":{"element":{"type":"string","description":"New element symbol (e.g., 'C', 'N', 'O', 'H', 'S', 'P')"}},"required":["element"]}}},
-  {"type":"function","function":{"name":"rotational_scan","description":"Perform a torsion/dihedral scan: rotate atoms around a bond axis in increments, generating frames. For torsion scans: (1) split_molecule first to get fragments, (2) use the SMALLER fragment as atomsToMove, (3) use the bond atoms as axis. Always followed by calculate_all_energies and create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the rotation axis (0-indexed). This is one of the bond atoms."},"axisAtom2":{"type":"integer","description":"Second atom index defining the rotation axis (0-indexed). This is the other bond atom."},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed). For torsion scans, use the SMALLER fragment from split_molecule result."},"increment":{"type":"number","description":"Rotation increment in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
+  {"type":"function","function":{"name":"rotational_scan","description":"Torsion scan: rotate atoms around bond axis. Use split_molecule first, then SMALLER fragment as atomsToMove. Follow with calculate_all_energies and create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First bond atom (0-based)"},"axisAtom2":{"type":"integer","description":"Second bond atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Atom indices to rotate (0-based). Use SMALLER fragment."},"increment":{"type":"number","description":"Rotation increment (deg, default: 10)"},"startAngle":{"type":"number","description":"Start angle (deg, default: 0)"},"endAngle":{"type":"number","description":"End angle (deg, default: 360)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"remove_atoms","description":"Delete the currently selected atoms from the molecule","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_distance","description":"Measure and display the distance between 2 atoms. Select exactly 2 atoms first.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_angle","description":"Measure and display the angle between 3 atoms. Select exactly 3 atoms (middle atom is vertex).","parameters":{"type":"object","properties":{}}}},
@@ -110,7 +114,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"set_style","description":"Change visual appearance of the molecule","parameters":{"type":"object","properties":{"roughness":{"type":"number","description":"Surface roughness 0-1"},"metalness":{"type":"number","description":"Metallic look 0-1"},"opacity":{"type":"number","description":"Transparency 0-1 (1=solid)"},"atomSize":{"type":"number","description":"Atom size multiplier 0.1-3"},"backgroundColor":{"type":"string","description":"Background color as hex e.g. #000000"}}}}},
   {"type":"function","function":{"name":"save_image","description":"Save a screenshot of the current view as PNG","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"translation_scan","description":"Perform a translation scan: move a fragment along an axis in increments, generating frames. Useful for dissociation curves.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the axis direction (0-indexed)"},"axisAtom2":{"type":"integer","description":"Second atom index defining the axis direction (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to translate (0-indexed)"},"startDistance":{"type":"number","description":"Starting distance in angstroms (default: 0)"},"endDistance":{"type":"number","description":"Ending distance in angstroms (default: 3)"},"increment":{"type":"number","description":"Step size in angstroms (default: 0.2)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
-  {"type":"function","function":{"name":"save_file","description":"Save molecule in various formats (XYZ, ExtXYZ, MOL, PDB, PQR, GRO, MOL2). Automatically includes per-atom forces and per-frame energies if available. If multiple frames exist, exports all as trajectory. Can save to downloads or local file explorer folder.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Output filename (default: auto-generated with timestamp and format extension)"},"format":{"type":"string","enum":["xyz","extxyz","mol","pdb","pqr","gro","mol2"],"description":"File format: xyz (basic), extxyz (with metadata/forces/energies), mol (MDL MOL), pdb (Protein Data Bank), pqr (PDB with charges), gro (GROMACS), mol2 (Tripos). Default: xyz"},"allFrames":{"type":"boolean","description":"If false, only export current frame even if multiple frames exist. Default is true."},"saveToLocal":{"type":"boolean","description":"If true, save to the open local folder in file explorer instead of downloading. When saving to local with energy/forces, automatically creates a metadata summary file."}}}}},
+  {"type":"function","function":{"name":"save_file","description":"Save molecule (XYZ, ExtXYZ, MOL, PDB, PQR, GRO, MOL2). Auto-includes forces/energies if available.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename (default: auto-generated)"},"format":{"type":"string","enum":["xyz","extxyz","mol","pdb","pqr","gro","mol2"],"description":"Format (default: xyz)"},"allFrames":{"type":"boolean","description":"Export all frames (default: true)"},"saveToLocal":{"type":"boolean","description":"Save to local folder vs download"}}}}},
   {"type":"function","function":{"name":"load_molecule","description":"Search and load a molecule by name from PubChem database","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Molecule name e.g. caffeine, aspirin"}},"required":["name"]}}},
   {"type":"function","function":{"name":"get_molecule_info","description":"Get information about the loaded molecule","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"get_atom_info","description":"Get detailed info about specific atoms","parameters":{"type":"object","properties":{"indices":{"type":"array","items":{"type":"integer"},"description":"Atom indices to get info for"}},"required":["indices"]}}},
@@ -119,10 +123,10 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"show_all_bond_lengths","description":"Show bond length labels for ALL bonds in the molecule at once","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"remove_bond_label","description":"Remove bond length label(s). Specify atom1 and atom2 to remove a specific label, or set all:true to remove all labels","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index"},"atom2":{"type":"integer","description":"Second atom index"},"all":{"type":"boolean","description":"Set true to remove all bond labels"}},"required":[]}}},
   {"type":"function","function":{"name":"calculate_energy","description":"Calculate the potential energy using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model to use"},"includeForces":{"type":"boolean","description":"Include per-atom forces in result (default: false). Only set true if forces are needed for visualization or analysis."}},"required":["model"]}}},
-  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for ALL frames using MACE ML potential. REQUIRED after rotational_scan, translation_scan, or angle_scan. Returns energy data that must be plotted with create_chart. CRITICAL: Always ask user which model to use (mace-mp-0a=fast, mace-mp-0b3=high-pressure, mace-mpa-0=most accurate). Never assume model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model: mace-mp-0a (fastest), mace-mp-0b3 (high-pressure systems), mace-mpa-0 (best accuracy)"},"includeForces":{"type":"boolean","description":"Include per-atom forces for each frame (default: false). Only set true if forces are needed."}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_all_energies","description":"Calculate energy for all frames (MACE ML). REQUIRED after scans. Always ask user for model. Follow with create_chart.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"mace-mp-0a (fast), mace-mp-0b3 (high-P), mace-mpa-0 (accurate)"},"includeForces":{"type":"boolean","description":"Include forces (default: false)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"optimize_geometry","description":"Optimize molecular geometry using MACE ML potential. IMPORTANT: Ask user which model to use first if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate), or 'mace-mpa-0' (best for materials)"},"fmax":{"type":"number","description":"Force convergence threshold in eV/Å (default: 0.05)"},"maxSteps":{"type":"integer","description":"Maximum optimization steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
-  {"type":"function","function":{"name":"run_md","description":"Run molecular dynamics (MD) simulation using MACE ML potential with Langevin thermostat (NVT ensemble). Generates trajectory frames that can be played with frame slider. IMPORTANT: Ask user for temperature and model if not specified.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model: 'small' (fast), 'medium' (balanced), 'large' (accurate)"},"temperature":{"type":"number","description":"Temperature in Kelvin (default: 300)"},"steps":{"type":"integer","description":"Number of MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in femtoseconds (default: 1.0)"},"friction":{"type":"number","description":"Langevin friction coefficient in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save frame every N steps (default: 10)"},"includeForces":{"type":"boolean","description":"Include per-atom forces in trajectory frames (default: false). Only set true if forces are needed."}},"required":["model"]}}},
-  {"type":"function","function":{"name":"create_chart","description":"Create and display an energy plot. REQUIRED after calculate_all_energies to visualize scan results. For torsion scans: x=[0,10,20,...,360] (angles), y=energies from calculate_all_energies, xLabel='Dihedral Angle (degrees)', yLabel='Energy (kcal/mol)'. For optimization: x=[0,1,2,...] (step numbers), y=energies, xLabel='Step', yLabel='Energy (kcal/mol)'.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type: use 'line' for scans and optimization (default: line)"},"title":{"type":"string","description":"Chart title: e.g., 'Torsion Scan' or 'Geometry Optimization'"},"xLabel":{"type":"string","description":"X-axis label: e.g., 'Dihedral Angle (degrees)' for torsion, 'Step' for optimization"},"yLabel":{"type":"string","description":"Y-axis label: usually 'Energy (kcal/mol)' or 'Energy (eV)'"},"x":{"type":"array","items":{"type":"number"},"description":"X-axis values: angles for torsion scan [0,10,20,...,360], step numbers for optimization [0,1,2,...]"},"y":{"type":"array","items":{"type":"number"},"description":"Y-axis values: energies from calculate_all_energies result"},"labels":{"type":"array","items":{"type":"string"},"description":"Labels for multiple series (optional)"}},"required":["x","y"]}}},
+  {"type":"function","function":{"name":"run_md","description":"Run MD simulation (MACE, Langevin NVT). Generates trajectory. Ask user for temp and model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE: small (fast), medium (balanced), large (accurate)"},"temperature":{"type":"number","description":"Temp in K (default: 300)"},"steps":{"type":"integer","description":"MD steps (default: 500)"},"timestep":{"type":"number","description":"Timestep in fs (default: 1.0)"},"friction":{"type":"number","description":"Friction in 1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save every N steps (default: 10)"},"includeForces":{"type":"boolean","description":"Include forces (default: false)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"create_chart","description":"Plot energy data. REQUIRED after calculate_all_energies. Torsion: x=angles, y=energies. Optimization: x=steps, y=energies.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X values (angles or steps)"},"y":{"type":"array","items":{"type":"number"},"description":"Y values (energies)"},"labels":{"type":"array","items":{"type":"string"},"description":"Series labels (optional)"}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"get_cached_energies","description":"Get the cached MACE energy results from the last calculate_all_energies call. Use this to plot or analyze energy data WITHOUT recalculating. Returns the same data as calculate_all_energies if cache exists.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"set_angle","description":"Set the bond angle between 3 selected atoms to a specific value. Select exactly 3 atoms in order: A-B-C where B is the vertex atom. Rotates the fragment on atom A's side.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target angle in degrees (0-180)"}},"required":["angle"]}}},
@@ -132,134 +136,75 @@ TOOLS_JSON = """[
 
 TOOLS = orjson.loads(TOOLS_JSON)
 
+# Pre-compute Claude tools schema (avoid recomputing on every request)
+CLAUDE_TOOLS = [
+    {
+        "name": t["function"]["name"],
+        "description": t["function"]["description"],
+        "input_schema": t["function"]["parameters"],
+    }
+    for t in TOOLS
+]
+
 
 def hash_state(state):
     """Create a hash of the state for caching"""
     import hashlib
+
     # Only hash the parts that affect the prompt
     key_parts = [
-        state.get('hasAtoms', False),
-        state.get('atomCount', 0),
-        state.get('selectedCount', 0),
-        tuple(state.get('selectedIndices', [])),
-        len(state.get('fragments', [])),
-        state.get('hasAxis', False),
-        tuple(state.get('axisAtoms', [])) if state.get('hasAxis') else (),
-        state.get('frameCount', 0),
-        state.get('currentFrame', 0),
-        state.get('hasEnergies', False),
-        state.get('hasForces', False),
-        state.get('hasMaceCache', False),
-        state.get('maceFrameCount', 0),
-        state.get('currentFileName', ''),
+        state.get("hasAtoms", False),
+        state.get("atomCount", 0),
+        state.get("selectedCount", 0),
+        tuple(state.get("selectedIndices", [])),
+        len(state.get("fragments", [])),
+        state.get("hasAxis", False),
+        tuple(state.get("axisAtoms", [])) if state.get("hasAxis") else (),
+        state.get("frameCount", 0),
+        state.get("currentFrame", 0),
+        state.get("hasEnergies", False),
+        state.get("hasForces", False),
+        state.get("hasMaceCache", False),
+        state.get("maceFrameCount", 0),
+        state.get("currentFileName", ""),
     ]
     return hashlib.md5(str(key_parts).encode()).hexdigest()
 
+
 def build_system_prompt(state):
-    return f"""You are ChopChopMol's AI assistant. Execute commands immediately.
+    return f"""ChopChopMol AI. Execute immediately.
 
-STATE:
-- Molecule: {str(state.get('atomCount', 0)) + ' atoms' if state.get('hasAtoms') else 'None'}
-- Selected: {state.get('selectedCount', 0)} atoms {('[' + ','.join(map(str, state.get('selectedIndices', []))) + ']') if state.get('selectedCount', 0) > 0 else ''}
-- Fragments: {len(state.get('fragments', []))} {dumps(state.get('fragments', []))}
-- Axis: {'atoms ' + str(state.get('axisAtoms', [])[0]) + '-' + str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}
-- Frames: {state.get('frameCount', 0)}{' (current: ' + str(state.get('currentFrame', 0)) + ')' if state.get('frameCount', 0) > 1 else ''}
-- Frame Energies: {'Available' if state.get('hasEnergies') else 'Not available'}
-- Forces: {'Available' if state.get('hasForces') else 'Not available'}
-- MACE cache: {'Yes (' + str(state.get('maceFrameCount', 0)) + ' frames)' if state.get('hasMaceCache') else 'No'}
+STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, Energies={'Y' if state.get('hasEnergies') else 'N'}, Forces={'Y' if state.get('hasForces') else 'N'}, MACE={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}
 
-CRITICAL: User sees 1-based atom numbers, but you MUST use 0-based indices.
-Example: User says "atom 5" → you use index 4 in tool calls.
+CRITICAL: User uses 1-based indices, you use 0-based. "atom 5" → index 4.
 
-=== TORSION/DIHEDRAL SCAN WORKFLOW ===
-When user asks to scan a torsion angle or dihedral on bond between atoms X and Y:
+TORSION SCAN (bond X-Y):
+1. split_molecule(X-1, Y-1) → get fragments
+2. Pick SMALLER fragment as atomsToMove
+3. rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, atomsToMove=[smaller], increment=10)
+4. calculate_all_energies(model) - ASK user for model first
+5. create_chart(x=[0,10,...,360], y=energies, xLabel="Angle (deg)", yLabel="Energy (kcal/mol)")
 
-Step 1: Split the molecule
-- Call split_molecule with atom1=X-1, atom2=Y-1 (convert to 0-based!)
-- This breaks the bond and creates two fragments
-- The split_molecule tool returns which atoms are in each fragment
-
-Step 2: Identify which fragment to rotate
-- Look at the split_molecule result
-- It tells you fragment1 atoms and fragment2 atoms
-- IMPORTANT: Choose the SMALLER fragment to rotate (fewer atoms)
-- If fragments are equal size, use fragment2
-
-Step 3: Call rotational_scan
-- Use axisAtom1=X-1, axisAtom2=Y-1 (the bond atoms, 0-based)
-- Use atomsToMove=<the atoms from the smaller fragment>
-- Use increment=10 (or user's value)
-- Use startAngle=0, endAngle=360 (default)
-
-Step 4: Calculate energies
-- Call calculate_all_energies with model (ask user if not specified)
-- This calculates energy for each rotation frame
-
-Step 5: Plot the results
-- Call create_chart with:
-  - x = [0, 10, 20, 30, ..., 360] (the rotation angles)
-  - y = energies from calculate_all_energies
-  - title = "Torsion Scan"
-  - xLabel = "Dihedral Angle (degrees)"
-  - yLabel = "Energy (kcal/mol)"
-
-EXAMPLE: "Do a torsion scan on bond between atoms 5 and 6"
-1. split_molecule(atom1=4, atom2=5)  ← Note: 0-based!
-2. Look at result: fragment1=[0,1,2,3,4], fragment2=[5,6,7,8]
-3. fragment1 has 5 atoms, fragment2 has 4 atoms → use fragment2
-4. rotational_scan(axisAtom1=4, axisAtom2=5, atomsToMove=[5,6,7,8], increment=10)
-5. calculate_all_energies(model="mace-mp-0a")
-6. create_chart(x=[0,10,20,...,360], y=energies, title="Torsion Scan")
-
-=== WHICH FRAGMENT TO ROTATE ===
-ALWAYS rotate the SMALLER fragment (fewer atoms). Why?
-- More efficient computation
-- Standard convention in chemistry
-- If you rotate the larger fragment, the results are the same but slower
-
-=== OTHER COMMON WORKFLOWS ===
-
-Geometry optimization:
-1. optimize_geometry(model=<ask user>)
+GEO OPTIMIZATION:
+1. optimize_geometry(model) - ASK user
 2. get_cached_energies()
-3. create_chart(x=step_indices, y=energies)
+3. create_chart
 
-Translation scan (bond dissociation):
-1. split_molecule(atom1, atom2)
-2. translation_scan(axisAtom1, axisAtom2, atomsToMove=<smaller fragment>)
-3. calculate_all_energies
-4. create_chart
+TOOLS:
+- Select: select_atoms, select_atoms_by_element, clear_selection
+- Edit: add_atom, remove_atoms, change_atom_element, transform_atoms
+- Scan: rotational_scan, translation_scan, angle_scan, split_molecule
+- Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies
+- View: toggle_labels, set_style, create_chart, save_file
+- Measure: measure_distance, measure_angle, measure_dihedral
 
-Rotate specific atoms:
-1. transform_atoms(axisAtom1, axisAtom2, atomsToMove=[...], angle=90)
-   Note: Don't call define_axis separately - transform_atoms handles it
-
-=== TOOLS AVAILABLE ===
-Selection: select_atoms, select_all_atoms, select_atoms_by_element, clear_selection
-Editing: add_atom, remove_atoms, change_atom_element, add_hydrogens
-Transform: transform_atoms (rotation/translation in one call)
-Measure: measure_distance, measure_angle, measure_dihedral
-Scans: rotational_scan, translation_scan, angle_scan
-Fragments: split_molecule (breaks bond, returns fragment info)
-Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies
-View: reset_camera, zoom_to_fit, toggle_labels, set_style
-Files: save_file, load_molecule, create_file, read_file
-Info: get_molecule_info, get_atom_info, get_bonded_atoms
-Other: undo, redo, create_chart
-
-=== RULES ===
-1. Use MINIMUM tool calls - combine when possible
-2. After scans, ALWAYS: calculate_all_energies → create_chart
-3. For MACE calculations, ALWAYS ask user which model (mace-mp-0a, mace-mp-0b3, mace-mpa-0)
-4. After optimize_geometry, use get_cached_energies (energies already calculated)
-5. Respond briefly (1-2 sentences max) after actions
-6. Use markdown: **bold** for emphasis, lists for steps
-7. If MACE cache exists, use get_cached_energies instead of recalculating
-
-=== ENERGY DATA ACCESS ===
-- If hasEnergies=true: Use state.energies array
-- If hasMaceCache=true: Use get_cached_energies()
-- Otherwise: Must call calculate_all_energies first"""
+RULES:
+1. Min tool calls
+2. After scans: calculate_all_energies → create_chart
+3. ALWAYS ask user for MACE model (mace-mp-0a/0b3/mpa-0)
+4. After optimize: get_cached_energies (don't recalc)
+5. Brief responses (1-2 sentences)
+6. Use cached energies if hasMaceCache=Y"""
 
 
 @app.route("/health", methods=["GET"])
@@ -489,47 +434,45 @@ def chat_stream():
     while history_slice and history_slice[0].get("role") == "tool":
         history_slice = history_slice[1:]
 
-    # === FINAL SAFETY: Ensure every assistant with tool_calls has matching tool responses ===
-    # This runs on EVERY request, not just when tool_results is present
-    i = 0
-    while i < len(history_slice) - 1:
-        msg = history_slice[i]
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            assistant_tc_ids = {tc["id"] for tc in msg["tool_calls"]}
-            # Look at all following messages until next assistant/user
-            following_tool_ids = set()
-            j = i + 1
-            while j < len(history_slice) and history_slice[j].get("role") == "tool":
-                following_tool_ids.add(history_slice[j].get("tool_call_id"))
-                j += 1
-            missing_ids = assistant_tc_ids - following_tool_ids
-            if missing_ids:
-                # Reconstruct missing tool responses as errors (or empty) to satisfy validation
-                for mid in missing_ids:
-                    history_slice.insert(
-                        j,
-                        {
-                            "role": "tool",
-                            "tool_call_id": mid,
-                            "content": "Error: Tool execution result missing (possibly from previous session). Assuming success for continuation.",
-                        },
-                    )
-                # Optional: also reconstruct assistant if completely missing — but usually not needed
-        i += 1
-
-    print(
-        f"📜 Final history slice after pairing fix: {len(history_slice)} messages",
-        flush=True,
+    # === OPTIMIZED: Only repair if there are actually tool_calls in history ===
+    # Check if repair is needed (saves ~10-20ms per request when no tools)
+    has_tool_calls = any(
+        msg.get("role") == "assistant" and msg.get("tool_calls")
+        for msg in history_slice
     )
+
+    if has_tool_calls:
+        i = 0
+        while i < len(history_slice) - 1:
+            msg = history_slice[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                assistant_tc_ids = {tc["id"] for tc in msg["tool_calls"]}
+                # Look at all following messages until next assistant/user
+                following_tool_ids = set()
+                j = i + 1
+                while j < len(history_slice) and history_slice[j].get("role") == "tool":
+                    following_tool_ids.add(history_slice[j].get("tool_call_id"))
+                    j += 1
+                missing_ids = assistant_tc_ids - following_tool_ids
+                if missing_ids:
+                    # Reconstruct missing tool responses as errors (or empty) to satisfy validation
+                    for mid in missing_ids:
+                        history_slice.insert(
+                            j,
+                            {
+                                "role": "tool",
+                                "tool_call_id": mid,
+                                "content": "Error: Tool execution result missing (possibly from previous session). Assuming success for continuation.",
+                            },
+                        )
+            i += 1
+        print(f"📜 History repaired: {len(history_slice)} messages", flush=True)
+    else:
+        print(f"📜 History clean (no tools): {len(history_slice)} messages", flush=True)
 
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
 
     # Safe token estimation (fix for None content)
-    total_tokens_est = sum(len(str(m.get("content") or "")) // 4 for m in messages)
-    print(
-        f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
-        flush=True,
-    )
     total_tokens_est = sum(len(str(m.get("content") or "")) // 4 for m in messages)
     print(
         f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
@@ -545,29 +488,22 @@ def chat_stream():
             if is_claude:
                 if not claude_client:
                     raise ValueError("ANTHROPIC_API_KEY not set")
-                claude_tools = [
-                    {
-                        "name": t["function"]["name"],
-                        "description": t["function"]["description"],
-                        "input_schema": t["function"]["parameters"],
-                    }
-                    for t in TOOLS
-                ]
+                # Use pre-computed Claude tools schema (cached at startup)
                 # Repair history specifically for Claude's strict pairing requirement
                 repaired_history = repair_claude_history_for_tool_pairing(history_slice)
                 claude_messages = convert_to_claude_messages(repaired_history)
                 call_params = {
                     "model": model,
-                    "max_tokens": 8192,
+                    "max_tokens": 4096,  # Reduced from 8192 for faster responses
                     "messages": claude_messages,
                     "system": [
                         {
                             "type": "text",
                             "text": systemPrompt,
-                            "cache_control": {"type": "ephemeral"}
+                            "cache_control": {"type": "ephemeral"},
                         }
                     ],
-                    "tools": claude_tools if TOOLS else None,
+                    "tools": CLAUDE_TOOLS if TOOLS else None,
                     "stream": True,
                 }
             else:
@@ -1178,6 +1114,295 @@ def transcribe_audio():
         print(f"Transcription error: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+# ============================================================================
+# REMOTE FILE SYSTEM ACCESS (SSH/SFTP)
+# ============================================================================
+
+import paramiko
+import stat as stat_module
+from threading import Lock
+
+# Store active SFTP connections per session
+sftp_connections = (
+    {}
+)  # {session_id: {"client": SSHClient, "sftp": SFTPClient, "host": str}}
+sftp_lock = Lock()
+
+
+def cleanup_sftp_connection(session_id):
+    """Close and remove SFTP connection"""
+    with sftp_lock:
+        if session_id in sftp_connections:
+            try:
+                conn = sftp_connections[session_id]
+                if conn.get("sftp"):
+                    conn["sftp"].close()
+                if conn.get("client"):
+                    conn["client"].close()
+            except:
+                pass
+            del sftp_connections[session_id]
+
+
+@app.route("/api/remote/connect", methods=["POST"])
+def remote_connect():
+    """Connect to remote host via SSH/SFTP"""
+    data = request.json
+    session_id = data.get("sessionId")
+    host = data.get("host")
+    port = data.get("port", 22)
+    username = data.get("username")
+    password = data.get("password")
+    key_file = data.get("keyFile")  # Base64 encoded private key (optional)
+
+    if not all([session_id, host, username]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Close existing connection if any
+    cleanup_sftp_connection(session_id)
+
+    try:
+        # Create SSH client
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Connect with password or key
+        if key_file:
+            # Decode base64 key
+            import io
+
+            key_bytes = base64.b64decode(key_file)
+            key = paramiko.RSAKey.from_private_key(io.StringIO(key_bytes.decode()))
+            client.connect(host, port=port, username=username, pkey=key, timeout=10)
+        elif password:
+            client.connect(
+                host, port=port, username=username, password=password, timeout=10
+            )
+        else:
+            return jsonify({"error": "Must provide password or keyFile"}), 400
+
+        # Open SFTP session
+        sftp = client.open_sftp()
+
+        # Get home directory
+        home_dir = sftp.normalize(".")
+
+        # Store connection
+        with sftp_lock:
+            sftp_connections[session_id] = {
+                "client": client,
+                "sftp": sftp,
+                "host": host,
+                "username": username,
+                "connected_at": time(),
+            }
+
+        return jsonify(
+            {
+                "success": True,
+                "host": host,
+                "username": username,
+                "homeDir": home_dir,
+                "message": f"Connected to {username}@{host}",
+            }
+        )
+
+    except Exception as e:
+        cleanup_sftp_connection(session_id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/disconnect", methods=["POST"])
+def remote_disconnect():
+    """Disconnect from remote host"""
+    data = request.json
+    session_id = data.get("sessionId")
+
+    cleanup_sftp_connection(session_id)
+    return jsonify({"success": True})
+
+
+@app.route("/api/remote/list", methods=["POST"])
+def remote_list():
+    """List files in remote directory"""
+    data = request.json
+    session_id = data.get("sessionId")
+    path = data.get("path", ".")
+
+    with sftp_lock:
+        if session_id not in sftp_connections:
+            return jsonify({"error": "Not connected"}), 401
+
+        sftp = sftp_connections[session_id]["sftp"]
+
+    try:
+        items = []
+        for entry in sftp.listdir_attr(path):
+            is_dir = stat_module.S_ISDIR(entry.st_mode)
+            items.append(
+                {
+                    "name": entry.filename,
+                    "path": (
+                        f"{path}/{entry.filename}" if path != "." else entry.filename
+                    ),
+                    "isDir": is_dir,
+                    "size": entry.st_size if not is_dir else 0,
+                    "modified": entry.st_mtime,
+                    "permissions": oct(entry.st_mode)[-3:],
+                }
+            )
+
+        # Sort: folders first, then files
+        items.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
+
+        return jsonify({"success": True, "items": items, "path": path})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/read", methods=["POST"])
+def remote_read():
+    """Read remote file content"""
+    data = request.json
+    session_id = data.get("sessionId")
+    path = data.get("path")
+
+    if not path:
+        return jsonify({"error": "Path required"}), 400
+
+    with sftp_lock:
+        if session_id not in sftp_connections:
+            return jsonify({"error": "Not connected"}), 401
+
+        sftp = sftp_connections[session_id]["sftp"]
+
+    try:
+        # Read file
+        with sftp.file(path, "r") as f:
+            content = f.read().decode("utf-8")
+
+        # Get file stats
+        stat = sftp.stat(path)
+
+        return jsonify(
+            {
+                "success": True,
+                "content": content,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "filename": path.split("/")[-1],
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/write", methods=["POST"])
+def remote_write():
+    """Write content to remote file"""
+    data = request.json
+    session_id = data.get("sessionId")
+    path = data.get("path")
+    content = data.get("content", "")
+
+    if not path:
+        return jsonify({"error": "Path required"}), 400
+
+    with sftp_lock:
+        if session_id not in sftp_connections:
+            return jsonify({"error": "Not connected"}), 401
+
+        sftp = sftp_connections[session_id]["sftp"]
+
+    try:
+        # Write file
+        with sftp.file(path, "w") as f:
+            f.write(content.encode("utf-8"))
+
+        return jsonify({"success": True, "message": "File saved"})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/delete", methods=["POST"])
+def remote_delete():
+    """Delete remote file or directory"""
+    data = request.json
+    session_id = data.get("sessionId")
+    path = data.get("path")
+    is_dir = data.get("isDir", False)
+
+    if not path:
+        return jsonify({"error": "Path required"}), 400
+
+    with sftp_lock:
+        if session_id not in sftp_connections:
+            return jsonify({"error": "Not connected"}), 401
+
+        sftp = sftp_connections[session_id]["sftp"]
+
+    try:
+        if is_dir:
+            sftp.rmdir(path)
+        else:
+            sftp.remove(path)
+
+        return jsonify({"success": True, "message": "Deleted successfully"})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/mkdir", methods=["POST"])
+def remote_mkdir():
+    """Create remote directory"""
+    data = request.json
+    session_id = data.get("sessionId")
+    path = data.get("path")
+
+    if not path:
+        return jsonify({"error": "Path required"}), 400
+
+    with sftp_lock:
+        if session_id not in sftp_connections:
+            return jsonify({"error": "Not connected"}), 401
+
+        sftp = sftp_connections[session_id]["sftp"]
+
+    try:
+        sftp.mkdir(path)
+        return jsonify({"success": True, "message": "Directory created"})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/remote/status", methods=["POST"])
+def remote_status():
+    """Get connection status"""
+    data = request.json
+    session_id = data.get("sessionId")
+
+    with sftp_lock:
+        if session_id in sftp_connections:
+            conn = sftp_connections[session_id]
+            return jsonify(
+                {
+                    "connected": True,
+                    "host": conn["host"],
+                    "username": conn["username"],
+                    "connectedAt": conn["connected_at"],
+                }
+            )
+        else:
+            return jsonify({"connected": False})
+
+
+# ============================================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
