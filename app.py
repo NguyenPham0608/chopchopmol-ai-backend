@@ -131,7 +131,8 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"set_dihedral_angle","description":"Set the dihedral/torsion angle between 4 selected atoms to a specific value. Rotates the fragment on the 4th atom side around the central bond (atoms 2-3). Select exactly 4 atoms in order: A-B-C-D where B-C is the rotation axis.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target dihedral angle in degrees (0-360)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"set_angle","description":"Set the bond angle between 3 selected atoms to a specific value. Select exactly 3 atoms in order: A-B-C where B is the vertex atom. Rotates the fragment on atom A's side.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target angle in degrees (0-180)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"angle_scan","description":"Perform an angle scan: rotate a fragment around an axis perpendicular to the plane formed by 3 atoms through a range of angles. B is the pivot point.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index (0-indexed)"},"atom2":{"type":"integer","description":"Vertex/pivot atom index (0-indexed)"},"atom3":{"type":"integer","description":"Third atom index (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed)"},"increment":{"type":"number","description":"Step size in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["atom1","atom2","atom3"]}}},
-  {"type":"function","function":{"name":"toggle_force_arrows","description":"Toggle visualization of force vectors on atoms. Shows arrows indicating direction and magnitude of forces from the last energy calculation. Green=low force, red=high force. Requires energy calculation first.","parameters":{"type":"object","properties":{}}}}
+  {"type":"function","function":{"name":"toggle_force_arrows","description":"Toggle visualization of force vectors on atoms. Shows arrows indicating direction and magnitude of forces from the last energy calculation. Green=low force, red=high force. Requires energy calculation first.","parameters":{"type":"object","properties":{}}}},
+  {"type":"function","function":{"name":"toggle_charge_visualization","description":"Toggle charge-based atom coloring and/or charge labels. Colors atoms by partial charge (red=negative, blue=positive). Requires a molecule with charge data (from ORCA .out files or other sources).","parameters":{"type":"object","properties":{"showColors":{"type":"boolean","description":"Enable/disable charge-based atom coloring (red=negative, blue=positive)"},"showLabels":{"type":"boolean","description":"Enable/disable charge value labels on atoms"},"chargeType":{"type":"string","enum":["mulliken","loewdin"],"description":"Type of charges to display (default: mulliken)"}},"required":[]}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -195,7 +196,7 @@ TOOLS:
 - Edit: add_atom, remove_atoms, change_atom_element, transform_atoms
 - Scan: rotational_scan, translation_scan, angle_scan, split_molecule
 - Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies
-- View: toggle_labels, set_style, create_chart, save_file
+- View: toggle_labels, toggle_charge_visualization, set_style, create_chart, save_file
 - Measure: measure_distance, measure_angle, measure_dihedral
 
 RULES:
