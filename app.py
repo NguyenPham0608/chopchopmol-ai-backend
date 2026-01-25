@@ -1117,6 +1117,235 @@ def transcribe_audio():
 
 
 # ============================================================================
+# MOLECULAR ORBITAL VISUALIZATION (PySCF)
+# ============================================================================
+
+
+@app.route("/ai/molden/orbital", methods=["POST"])
+def evaluate_orbital():
+    """
+    Evaluate a molecular orbital from a molden file on a 3D grid using PySCF.
+
+    This uses PySCF's molden parser and GTO evaluation, which correctly handles:
+    - Spherical vs Cartesian basis sets
+    - Different normalization conventions (ORCA, PySCF, Gaussian, etc.)
+    - All angular momentum types (s, p, d, f, g)
+
+    Returns volumetric data compatible with marching cubes isosurface generation.
+    """
+    import tempfile
+    import traceback
+
+    data = request.json
+    molden_content = data.get("moldenContent")
+    orbital_index = data.get("orbitalIndex", 0)
+    grid_size = data.get("gridSize", 50)
+    padding = data.get("padding", 4.0)  # Bohr
+
+    if not molden_content:
+        return jsonify({"error": "No molden content provided"}), 400
+
+    try:
+        from pyscf.tools import molden as pyscf_molden
+
+        # Write molden content to a temporary file (PySCF needs a file path)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.molden', delete=False) as tmp:
+            tmp.write(molden_content)
+            tmp_path = tmp.name
+
+        try:
+            # Load molden file with PySCF
+            mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+        n_mo = mo_coeff.shape[1]
+        if orbital_index < 0 or orbital_index >= n_mo:
+            return jsonify({"error": f"Orbital index {orbital_index} out of range (0-{n_mo-1})"}), 400
+
+        # Get atom coordinates (in Bohr)
+        coords = mol.atom_coords()
+
+        # Create 3D grid around the molecule
+        x_min, y_min, z_min = coords.min(axis=0) - padding
+        x_max, y_max, z_max = coords.max(axis=0) + padding
+
+        x = np.linspace(x_min, x_max, grid_size)
+        y = np.linspace(y_min, y_max, grid_size)
+        z = np.linspace(z_min, z_max, grid_size)
+
+        # Create meshgrid and flatten for evaluation
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+        # Evaluate atomic orbitals on the grid using PySCF
+        # This handles all the complexity of basis function evaluation
+        ao_values = mol.eval_gto('GTOval_sph', grid_points)
+
+        # Compute MO values: MO = sum_i (c_i * AO_i)
+        mo_values = ao_values @ mo_coeff[:, orbital_index]
+        mo_values = mo_values.reshape(X.shape)
+
+        # Calculate grid spacing (convert to Angstroms for frontend)
+        BOHR_TO_ANG = 0.529177249
+        spacing_x = (x[1] - x[0]) * BOHR_TO_ANG if len(x) > 1 else 1.0
+        spacing_y = (y[1] - y[0]) * BOHR_TO_ANG if len(y) > 1 else 1.0
+        spacing_z = (z[1] - z[0]) * BOHR_TO_ANG if len(z) > 1 else 1.0
+
+        # Origin in Angstroms
+        origin_x = x[0] * BOHR_TO_ANG
+        origin_y = y[0] * BOHR_TO_ANG
+        origin_z = z[0] * BOHR_TO_ANG
+
+        # Get orbital info
+        n_occ = int(sum(mo_occ) // 2)
+        homo_index = n_occ - 1 if n_occ > 0 else -1
+        lumo_index = n_occ if n_occ < n_mo else -1
+
+        # Determine orbital type
+        if orbital_index == homo_index:
+            orbital_type = "HOMO"
+        elif orbital_index == lumo_index:
+            orbital_type = "LUMO"
+        elif orbital_index < homo_index:
+            orbital_type = f"H-{homo_index - orbital_index}"
+        else:
+            orbital_type = f"L+{orbital_index - lumo_index}"
+
+        # Build orbital list for frontend
+        orbitals_info = []
+        for i in range(n_mo):
+            orbitals_info.append({
+                "index": i,
+                "energy": float(mo_energy[i]),
+                "occupation": float(mo_occ[i]),
+                "spin": "Alpha"
+            })
+
+        return jsonify({
+            "success": True,
+            "volumeData": mo_values.flatten().tolist(),
+            "gridInfo": {
+                "origin": {"x": origin_x, "y": origin_y, "z": origin_z},
+                "dimensions": [grid_size, grid_size, grid_size],
+                "spacing": [spacing_x, spacing_y, spacing_z],
+                "vectors": {
+                    "x": [spacing_x, 0, 0],
+                    "y": [0, spacing_y, 0],
+                    "z": [0, 0, spacing_z]
+                }
+            },
+            "minValue": float(mo_values.min()),
+            "maxValue": float(mo_values.max()),
+            "orbitalIndex": orbital_index,
+            "orbitalType": orbital_type,
+            "energy": float(mo_energy[orbital_index]),
+            "occupation": float(mo_occ[orbital_index]),
+            "homoIndex": homo_index,
+            "lumoIndex": lumo_index,
+            "numOrbitals": n_mo,
+            "orbitals": orbitals_info,
+            "comment": f"MO {orbital_index + 1} ({orbital_type})"
+        })
+
+    except ImportError as e:
+        return jsonify({
+            "error": "PySCF not installed. Install with: pip install pyscf",
+            "details": str(e)
+        }), 500
+    except Exception as e:
+        print(f"❌ Molden orbital evaluation error: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/ai/molden/info", methods=["POST"])
+def get_molden_info():
+    """
+    Get information about orbitals in a molden file without computing the grid.
+    Useful for populating the orbital selection table.
+    """
+    import tempfile
+    import traceback
+
+    data = request.json
+    molden_content = data.get("moldenContent")
+
+    if not molden_content:
+        return jsonify({"error": "No molden content provided"}), 400
+
+    try:
+        from pyscf.tools import molden as pyscf_molden
+
+        # Write molden content to a temporary file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.molden', delete=False) as tmp:
+            tmp.write(molden_content)
+            tmp_path = tmp.name
+
+        try:
+            mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+        n_mo = mo_coeff.shape[1]
+        n_occ = int(sum(mo_occ) // 2)
+        homo_index = n_occ - 1 if n_occ > 0 else -1
+        lumo_index = n_occ if n_occ < n_mo else -1
+
+        # Get atom info
+        atoms = []
+        BOHR_TO_ANG = 0.529177249
+        for i in range(mol.natm):
+            symbol = mol.atom_symbol(i)
+            coord = mol.atom_coord(i)  # In Bohr
+            atoms.append({
+                "element": symbol,
+                "x": coord[0] * BOHR_TO_ANG,
+                "y": coord[1] * BOHR_TO_ANG,
+                "z": coord[2] * BOHR_TO_ANG
+            })
+
+        # Build orbital list
+        orbitals = []
+        for i in range(n_mo):
+            orbitals.append({
+                "index": i,
+                "energy": float(mo_energy[i]),
+                "occupation": float(mo_occ[i]),
+                "spin": "Alpha"
+            })
+
+        # Calculate HOMO-LUMO gap
+        gap = None
+        if homo_index >= 0 and lumo_index >= 0 and lumo_index < n_mo:
+            gap = float(mo_energy[lumo_index] - mo_energy[homo_index])
+
+        return jsonify({
+            "success": True,
+            "numAtoms": mol.natm,
+            "numOrbitals": n_mo,
+            "numOccupied": n_occ,
+            "homoIndex": homo_index,
+            "lumoIndex": lumo_index,
+            "homoLumoGap": gap,
+            "orbitals": orbitals,
+            "atoms": atoms
+        })
+
+    except ImportError as e:
+        return jsonify({
+            "error": "PySCF not installed. Install with: pip install pyscf",
+            "details": str(e)
+        }), 500
+    except Exception as e:
+        print(f"❌ Molden info error: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+# ============================================================================
 # REMOTE FILE SYSTEM ACCESS (SSH/SFTP)
 # ============================================================================
 
