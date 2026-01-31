@@ -8,6 +8,8 @@ import tempfile
 import numpy as np
 from ase import Atoms
 import base64
+import hashlib
+import zlib
 from io import BytesIO
 from time import time
 import torch
@@ -72,6 +74,115 @@ SESSION_TTL = 3600  # 1 hour
 # Prompt cache for speed optimization
 prompt_cache = {}  # {state_hash: prompt_string}
 MAX_PROMPT_CACHE = 1000
+
+# Molden molecule + AO grid cache
+# Key: (content_hash, gridSize, padding)
+# Value: dict with mol, mo_coeff, mo_energy, mo_occ, ao_values, grid_shape, grid_meta
+molden_cache = {}
+MAX_MOLDEN_CACHE = 10
+MOLDEN_CACHE_TTL = 1800  # 30 minutes
+BOHR_TO_ANG = 0.529177249
+
+
+def get_or_create_molden_cache(molden_content, grid_size, padding):
+    """Load and cache PySCF mol object + AO grid. The AO grid is the expensive
+    step and is identical for ALL orbitals of the same molecule at the same
+    grid resolution. Individual MO values are just ao_values @ mo_coeff[:, i]."""
+    content_hash = hashlib.sha256(molden_content.encode()).hexdigest()[:16]
+    cache_key = (content_hash, grid_size, padding)
+
+    if cache_key in molden_cache:
+        molden_cache[cache_key]["last_access"] = time()
+        return molden_cache[cache_key]
+
+    # Evict expired or overflow entries
+    now = time()
+    expired = [k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL]
+    for k in expired:
+        del molden_cache[k]
+    if len(molden_cache) >= MAX_MOLDEN_CACHE:
+        oldest = min(molden_cache, key=lambda k: molden_cache[k]["last_access"])
+        del molden_cache[oldest]
+
+    from pyscf.tools import molden as pyscf_molden
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".molden", delete=False) as tmp:
+        tmp.write(molden_content)
+        tmp_path = tmp.name
+
+    try:
+        mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    # Build 3D grid around the molecule
+    coords = mol.atom_coords()  # Bohr
+    x_min, y_min, z_min = coords.min(axis=0) - padding
+    x_max, y_max, z_max = coords.max(axis=0) + padding
+
+    x = np.linspace(x_min, x_max, grid_size)
+    y = np.linspace(y_min, y_max, grid_size)
+    z = np.linspace(z_min, z_max, grid_size)
+
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+    # Evaluate ALL atomic orbitals on grid ONCE (the expensive step)
+    ao_values = mol.eval_gto("GTOval_sph", grid_points)
+
+    spacing = [
+        (x[1] - x[0]) * BOHR_TO_ANG if len(x) > 1 else 1.0,
+        (y[1] - y[0]) * BOHR_TO_ANG if len(y) > 1 else 1.0,
+        (z[1] - z[0]) * BOHR_TO_ANG if len(z) > 1 else 1.0,
+    ]
+
+    n_mo = mo_coeff.shape[1]
+    n_occ = int(sum(mo_occ) // 2)
+    homo_index = n_occ - 1 if n_occ > 0 else -1
+    lumo_index = n_occ if n_occ < n_mo else -1
+
+    entry = {
+        "mol": mol,
+        "mo_coeff": mo_coeff,
+        "mo_energy": mo_energy,
+        "mo_occ": mo_occ,
+        "ao_values": ao_values,
+        "grid_shape": X.shape,
+        "grid_meta": {
+            "origin": [x[0] * BOHR_TO_ANG, y[0] * BOHR_TO_ANG, z[0] * BOHR_TO_ANG],
+            "spacing": spacing,
+            "dimensions": [grid_size, grid_size, grid_size],
+        },
+        "n_mo": n_mo,
+        "homo_index": homo_index,
+        "lumo_index": lumo_index,
+        "last_access": time(),
+    }
+    molden_cache[cache_key] = entry
+    return entry
+
+
+def compute_orbital_type(orbital_index, homo_index, lumo_index):
+    """Determine orbital type label (HOMO, LUMO, H-n, L+n)."""
+    if orbital_index == homo_index:
+        return "HOMO"
+    elif orbital_index == lumo_index:
+        return "LUMO"
+    elif homo_index >= 0 and orbital_index < homo_index:
+        return f"H-{homo_index - orbital_index}"
+    elif lumo_index >= 0:
+        return f"L+{orbital_index - lumo_index}"
+    return f"MO{orbital_index + 1}"
+
+
+def encode_orbital_binary(mo_values_flat, compress=True):
+    """Encode orbital volumetric data as base64, optionally with zlib compression."""
+    raw_bytes = mo_values_flat.astype(np.float32).tobytes()
+    if compress:
+        compressed = zlib.compress(raw_bytes, level=1)
+        return base64.b64encode(compressed).decode(), "base64_float32_zlib"
+    else:
+        return base64.b64encode(raw_bytes).decode(), "base64_float32"
 
 # Global OpenAI client - reuses TCP connection
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -1125,134 +1236,83 @@ def transcribe_audio():
 def evaluate_orbital():
     """
     Evaluate a molecular orbital from a molden file on a 3D grid using PySCF.
-
-    This uses PySCF's molden parser and GTO evaluation, which correctly handles:
-    - Spherical vs Cartesian basis sets
-    - Different normalization conventions (ORCA, PySCF, Gaussian, etc.)
-    - All angular momentum types (s, p, d, f, g)
-
-    Returns volumetric data compatible with marching cubes isosurface generation.
+    Uses cached mol object and AO grid for fast repeated evaluations.
     """
-    import tempfile
     import traceback
 
     data = request.json
     molden_content = data.get("moldenContent")
     orbital_index = data.get("orbitalIndex", 0)
     grid_size = data.get("gridSize", 50)
-    padding = data.get("padding", 4.0)  # Bohr
+    padding = data.get("padding", 4.0)
+    use_binary = data.get("binary", False)
 
     if not molden_content:
         return jsonify({"error": "No molden content provided"}), 400
 
     try:
-        from pyscf.tools import molden as pyscf_molden
+        cache = get_or_create_molden_cache(molden_content, grid_size, padding)
 
-        # Write molden content to a temporary file (PySCF needs a file path)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.molden', delete=False) as tmp:
-            tmp.write(molden_content)
-            tmp_path = tmp.name
-
-        try:
-            # Load molden file with PySCF
-            mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
-        finally:
-            import os
-            os.unlink(tmp_path)
-
-        n_mo = mo_coeff.shape[1]
+        n_mo = cache["n_mo"]
         if orbital_index < 0 or orbital_index >= n_mo:
             return jsonify({"error": f"Orbital index {orbital_index} out of range (0-{n_mo-1})"}), 400
 
-        # Get atom coordinates (in Bohr)
-        coords = mol.atom_coords()
+        # MO computation: just a dot product with cached AO grid
+        mo_values = cache["ao_values"] @ cache["mo_coeff"][:, orbital_index]
+        mo_values = mo_values.reshape(cache["grid_shape"])
 
-        # Create 3D grid around the molecule
-        x_min, y_min, z_min = coords.min(axis=0) - padding
-        x_max, y_max, z_max = coords.max(axis=0) + padding
+        homo_index = cache["homo_index"]
+        lumo_index = cache["lumo_index"]
+        orbital_type = compute_orbital_type(orbital_index, homo_index, lumo_index)
 
-        x = np.linspace(x_min, x_max, grid_size)
-        y = np.linspace(y_min, y_max, grid_size)
-        z = np.linspace(z_min, z_max, grid_size)
+        gm = cache["grid_meta"]
+        sp = gm["spacing"]
 
-        # Create meshgrid and flatten for evaluation
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
-
-        # Evaluate atomic orbitals on the grid using PySCF
-        # This handles all the complexity of basis function evaluation
-        ao_values = mol.eval_gto('GTOval_sph', grid_points)
-
-        # Compute MO values: MO = sum_i (c_i * AO_i)
-        mo_values = ao_values @ mo_coeff[:, orbital_index]
-        mo_values = mo_values.reshape(X.shape)
-
-        # Calculate grid spacing (convert to Angstroms for frontend)
-        BOHR_TO_ANG = 0.529177249
-        spacing_x = (x[1] - x[0]) * BOHR_TO_ANG if len(x) > 1 else 1.0
-        spacing_y = (y[1] - y[0]) * BOHR_TO_ANG if len(y) > 1 else 1.0
-        spacing_z = (z[1] - z[0]) * BOHR_TO_ANG if len(z) > 1 else 1.0
-
-        # Origin in Angstroms
-        origin_x = x[0] * BOHR_TO_ANG
-        origin_y = y[0] * BOHR_TO_ANG
-        origin_z = z[0] * BOHR_TO_ANG
-
-        # Get orbital info
-        n_occ = int(sum(mo_occ) // 2)
-        homo_index = n_occ - 1 if n_occ > 0 else -1
-        lumo_index = n_occ if n_occ < n_mo else -1
-
-        # Determine orbital type
-        if orbital_index == homo_index:
-            orbital_type = "HOMO"
-        elif orbital_index == lumo_index:
-            orbital_type = "LUMO"
-        elif orbital_index < homo_index:
-            orbital_type = f"H-{homo_index - orbital_index}"
+        # Encode volume data
+        if use_binary:
+            volume_data, data_format = encode_orbital_binary(mo_values.flatten(), compress=True)
         else:
-            orbital_type = f"L+{orbital_index - lumo_index}"
+            volume_data = mo_values.flatten().tolist()
+            data_format = "json"
 
         # Build orbital list for frontend
-        orbitals_info = []
-        for i in range(n_mo):
-            orbitals_info.append({
-                "index": i,
-                "energy": float(mo_energy[i]),
-                "occupation": float(mo_occ[i]),
-                "spin": "Alpha"
-            })
+        orbitals_info = [
+            {"index": i, "energy": float(cache["mo_energy"][i]),
+             "occupation": float(cache["mo_occ"][i]), "spin": "Alpha"}
+            for i in range(n_mo)
+        ]
 
         return jsonify({
             "success": True,
-            "volumeData": mo_values.flatten().tolist(),
+            "volumeData": volume_data,
+            "dataFormat": data_format,
             "gridInfo": {
-                "origin": {"x": origin_x, "y": origin_y, "z": origin_z},
-                "dimensions": [grid_size, grid_size, grid_size],
-                "spacing": [spacing_x, spacing_y, spacing_z],
+                "origin": {"x": gm["origin"][0], "y": gm["origin"][1], "z": gm["origin"][2]},
+                "dimensions": gm["dimensions"],
+                "spacing": sp,
                 "vectors": {
-                    "x": [spacing_x, 0, 0],
-                    "y": [0, spacing_y, 0],
-                    "z": [0, 0, spacing_z]
-                }
+                    "x": [sp[0], 0, 0],
+                    "y": [0, sp[1], 0],
+                    "z": [0, 0, sp[2]],
+                },
             },
             "minValue": float(mo_values.min()),
             "maxValue": float(mo_values.max()),
             "orbitalIndex": orbital_index,
             "orbitalType": orbital_type,
-            "energy": float(mo_energy[orbital_index]),
-            "occupation": float(mo_occ[orbital_index]),
+            "energy": float(cache["mo_energy"][orbital_index]),
+            "occupation": float(cache["mo_occ"][orbital_index]),
             "homoIndex": homo_index,
             "lumoIndex": lumo_index,
             "numOrbitals": n_mo,
             "orbitals": orbitals_info,
-            "comment": f"MO {orbital_index + 1} ({orbital_type})"
+            "comment": f"MO {orbital_index + 1} ({orbital_type})",
         })
 
     except ImportError as e:
         return jsonify({
             "error": "PySCF not installed. Install with: pip install pyscf",
-            "details": str(e)
+            "details": str(e),
         }), 500
     except Exception as e:
         print(f"❌ Molden orbital evaluation error: {str(e)}")
@@ -1264,60 +1324,48 @@ def evaluate_orbital():
 def get_molden_info():
     """
     Get information about orbitals in a molden file without computing the grid.
-    Useful for populating the orbital selection table.
+    Also primes the cache so subsequent orbital requests are fast.
     """
-    import tempfile
     import traceback
 
     data = request.json
     molden_content = data.get("moldenContent")
+    grid_size = data.get("gridSize", 50)
+    padding = data.get("padding", 4.0)
 
     if not molden_content:
         return jsonify({"error": "No molden content provided"}), 400
 
     try:
-        from pyscf.tools import molden as pyscf_molden
+        # Use cache helper — this also primes the AO grid for later orbital requests
+        cache = get_or_create_molden_cache(molden_content, grid_size, padding)
 
-        # Write molden content to a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.molden', delete=False) as tmp:
-            tmp.write(molden_content)
-            tmp_path = tmp.name
-
-        try:
-            mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
-        finally:
-            import os
-            os.unlink(tmp_path)
-
-        n_mo = mo_coeff.shape[1]
+        mol = cache["mol"]
+        mo_energy = cache["mo_energy"]
+        mo_occ = cache["mo_occ"]
+        n_mo = cache["n_mo"]
+        homo_index = cache["homo_index"]
+        lumo_index = cache["lumo_index"]
         n_occ = int(sum(mo_occ) // 2)
-        homo_index = n_occ - 1 if n_occ > 0 else -1
-        lumo_index = n_occ if n_occ < n_mo else -1
 
         # Get atom info
         atoms = []
-        BOHR_TO_ANG = 0.529177249
         for i in range(mol.natm):
             symbol = mol.atom_symbol(i)
-            coord = mol.atom_coord(i)  # In Bohr
+            coord = mol.atom_coord(i)
             atoms.append({
                 "element": symbol,
                 "x": coord[0] * BOHR_TO_ANG,
                 "y": coord[1] * BOHR_TO_ANG,
-                "z": coord[2] * BOHR_TO_ANG
+                "z": coord[2] * BOHR_TO_ANG,
             })
 
-        # Build orbital list
-        orbitals = []
-        for i in range(n_mo):
-            orbitals.append({
-                "index": i,
-                "energy": float(mo_energy[i]),
-                "occupation": float(mo_occ[i]),
-                "spin": "Alpha"
-            })
+        orbitals = [
+            {"index": i, "energy": float(mo_energy[i]),
+             "occupation": float(mo_occ[i]), "spin": "Alpha"}
+            for i in range(n_mo)
+        ]
 
-        # Calculate HOMO-LUMO gap
         gap = None
         if homo_index >= 0 and lumo_index >= 0 and lumo_index < n_mo:
             gap = float(mo_energy[lumo_index] - mo_energy[homo_index])
@@ -1331,18 +1379,122 @@ def get_molden_info():
             "lumoIndex": lumo_index,
             "homoLumoGap": gap,
             "orbitals": orbitals,
-            "atoms": atoms
+            "atoms": atoms,
         })
 
     except ImportError as e:
         return jsonify({
             "error": "PySCF not installed. Install with: pip install pyscf",
-            "details": str(e)
+            "details": str(e),
         }), 500
     except Exception as e:
         print(f"❌ Molden info error: {str(e)}")
         traceback.print_exc()
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/ai/molden/orbital-batch", methods=["POST"])
+def evaluate_orbital_batch():
+    """
+    Compute multiple (or all) orbitals in a single request.
+    Streams results as NDJSON (one JSON object per line) so the frontend can
+    update a progress bar and cache each orbital as it arrives.
+
+    The AO grid is evaluated once and cached; each orbital is just a fast
+    matrix-vector multiply (~10ms per orbital).
+    """
+    import traceback
+
+    data = request.json
+    molden_content = data.get("moldenContent")
+    grid_size = data.get("gridSize", 50)
+    padding = data.get("padding", 4.0)
+    orbital_indices = data.get("orbitalIndices")  # None = all
+
+    if not molden_content:
+        return Response(
+            orjson.dumps({"type": "error", "error": "No molden content provided"}).decode() + "\n",
+            status=400,
+            mimetype="application/x-ndjson",
+        )
+
+    try:
+        cache = get_or_create_molden_cache(molden_content, grid_size, padding)
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            orjson.dumps({"type": "error", "error": str(e)}).decode() + "\n",
+            status=500,
+            mimetype="application/x-ndjson",
+        )
+
+    n_mo = cache["n_mo"]
+    homo_index = cache["homo_index"]
+    lumo_index = cache["lumo_index"]
+
+    # Determine orbital order: HOMO/LUMO first, then expand outward
+    if orbital_indices is None:
+        ordered = []
+        added = set()
+        for idx in [homo_index, lumo_index]:
+            if 0 <= idx < n_mo and idx not in added:
+                ordered.append(idx)
+                added.add(idx)
+        center = homo_index if homo_index >= 0 else n_mo // 2
+        for r in range(1, n_mo):
+            for idx in [center - r, center + r]:
+                if 0 <= idx < n_mo and idx not in added:
+                    ordered.append(idx)
+                    added.add(idx)
+        orbital_indices = ordered
+
+    gm = cache["grid_meta"]
+    sp = gm["spacing"]
+
+    def generate():
+        # First line: metadata
+        meta = {
+            "type": "meta",
+            "numOrbitals": n_mo,
+            "totalRequested": len(orbital_indices),
+            "homoIndex": homo_index,
+            "lumoIndex": lumo_index,
+            "gridInfo": {
+                "origin": {"x": gm["origin"][0], "y": gm["origin"][1], "z": gm["origin"][2]},
+                "dimensions": gm["dimensions"],
+                "spacing": sp,
+                "vectors": {
+                    "x": [sp[0], 0, 0],
+                    "y": [0, sp[1], 0],
+                    "z": [0, 0, sp[2]],
+                },
+            },
+        }
+        yield orjson.dumps(meta).decode() + "\n"
+
+        for idx in orbital_indices:
+            try:
+                mo_values = cache["ao_values"] @ cache["mo_coeff"][:, idx]
+                mo_values = mo_values.reshape(cache["grid_shape"])
+
+                encoded, data_format = encode_orbital_binary(mo_values.flatten(), compress=True)
+
+                result = {
+                    "type": "orbital",
+                    "orbitalIndex": idx,
+                    "volumeData": encoded,
+                    "dataFormat": data_format,
+                    "minValue": float(mo_values.min()),
+                    "maxValue": float(mo_values.max()),
+                    "orbitalType": compute_orbital_type(idx, homo_index, lumo_index),
+                    "energy": float(cache["mo_energy"][idx]),
+                    "occupation": float(cache["mo_occ"][idx]),
+                }
+                yield orjson.dumps(result).decode() + "\n"
+            except Exception as e:
+                yield orjson.dumps({"type": "error", "orbitalIndex": idx, "error": str(e)}).decode() + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 # ============================================================================
