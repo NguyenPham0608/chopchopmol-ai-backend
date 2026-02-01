@@ -339,7 +339,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"remove_axis","description":"Remove the currently defined axis","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"transform_atoms","description":"Rotate or translate atoms around an axis defined by two atoms. Use this for ALL rotation and translation requests.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First atom index defining the axis (0-indexed)"},"axisAtom2":{"type":"integer","description":"Second atom index defining the axis (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to transform (0-indexed)"},"angle":{"type":"number","description":"Rotation angle in degrees (use this OR distance, not both)"},"distance":{"type":"number","description":"Translation distance in angstroms (use this OR angle, not both)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"change_atom_element","description":"Change the element type of selected atoms (e.g., change Carbon to Nitrogen)","parameters":{"type":"object","properties":{"element":{"type":"string","description":"New element symbol (e.g., 'C', 'N', 'O', 'H', 'S', 'P')"}},"required":["element"]}}},
-  {"type":"function","function":{"name":"rotational_scan","description":"Torsion scan: rotate atoms around bond axis. Use split_molecule first, then SMALLER fragment as atomsToMove. Follow with calculate_all_energies and create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First bond atom (0-based)"},"axisAtom2":{"type":"integer","description":"Second bond atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Atom indices to rotate (0-based). Use SMALLER fragment."},"increment":{"type":"number","description":"Rotation increment (deg, default: 10)"},"startAngle":{"type":"number","description":"Start angle (deg, default: 0)"},"endAngle":{"type":"number","description":"End angle (deg, default: 360)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
+  {"type":"function","function":{"name":"rotational_scan","description":"Torsion scan: rotate smaller fragment around a bonded atom pair. Automatically determines which fragment to rotate (picks smaller side). Just specify the bond. Follow with calculate_all_energies and create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First bond atom (0-based)"},"axisAtom2":{"type":"integer","description":"Second bond atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Optional override: atom indices to rotate (0-based). If omitted, auto-picks smaller fragment."},"increment":{"type":"number","description":"Rotation increment (deg, default: 10)"},"startAngle":{"type":"number","description":"Start angle (deg, default: 0)"},"endAngle":{"type":"number","description":"End angle (deg, default: 360)"}},"required":["axisAtom1","axisAtom2"]}}},
   {"type":"function","function":{"name":"remove_atoms","description":"Delete the currently selected atoms from the molecule","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_distance","description":"Measure and display the distance between 2 atoms. Select exactly 2 atoms first.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"measure_angle","description":"Measure and display the angle between 3 atoms. Select exactly 3 atoms (middle atom is vertex).","parameters":{"type":"object","properties":{}}}},
@@ -423,11 +423,9 @@ STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Select
 CRITICAL: User uses 1-based indices, you use 0-based. "atom 5" → index 4.
 
 TORSION SCAN (bond X-Y):
-1. split_molecule(X-1, Y-1) → get fragments
-2. Pick SMALLER fragment as atomsToMove
-3. rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, atomsToMove=[smaller], increment=10)
-4. calculate_all_energies(model) - ASK user for model first
-5. create_chart(x=[0,10,...,360], y=energies, xLabel="Angle (deg)", yLabel="Energy (kcal/mol)")
+1. rotational_scan(axisAtom1=X-1, axisAtom2=Y-1, increment=10) - auto-picks smaller fragment
+2. calculate_all_energies(model) - ASK user for model first
+3. create_chart(x=[0,10,...,350], y=energies, xLabel="Angle (deg)", yLabel="Energy (kcal/mol)")
 
 GEO OPTIMIZATION:
 1. optimize_geometry(model) - ASK user
@@ -443,12 +441,12 @@ TOOLS:
 - Measure: measure_distance, measure_angle, measure_dihedral
 
 RULES:
-1. Min tool calls
+1. Min tool calls, but use as needed.
 2. After scans: calculate_all_energies → create_chart
-3. ALWAYS ask user for MACE model (mace-mp-0a/0b3/mpa-0)
+3. ALWAYS ask user for MACE model (mace-mp-0a/0b3/mpa-0) UNLESS SPECIFIED FROM THE USER
 4. After optimize: get_cached_energies (don't recalc)
 5. Brief responses (1-2 sentences)
-6. Use cached energies if hasMaceCache=Y"""
+6. Use cached energies if hasMaceCache=Y BUT JUST USED THE ENERGIES YOU ALREADY CALCULATED IF YOU JUST RAN A CALCULATION."""
 
 
 @app.route("/health", methods=["GET"])
