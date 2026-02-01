@@ -1380,8 +1380,6 @@ def evaluate_orbital():
     grid_size = data.get("gridSize", 50)
     padding = data.get("padding", 4.0)
     use_binary = data.get("binary", False)
-    mesh_mode = data.get("meshMode", False)
-    iso_value = data.get("isoValue", 0.02)
 
     try:
         # Resolve cache: prefer cacheKey (no re-upload), fall back to moldenContent
@@ -1427,67 +1425,58 @@ def evaluate_orbital():
         gm = cache["grid_meta"]
         sp = gm["spacing"]
 
-        grid_info = {
-            "origin": {
-                "x": gm["origin"][0],
-                "y": gm["origin"][1],
-                "z": gm["origin"][2],
-            },
-            "dimensions": gm["dimensions"],
-            "spacing": sp,
-            "vectors": {
-                "x": [sp[0], 0, 0],
-                "y": [0, sp[1], 0],
-                "z": [0, 0, sp[2]],
-            },
-        }
-
-        result = {
-            "success": True,
-            "gridInfo": grid_info,
-            "minValue": float(mo_values.min()),
-            "maxValue": float(mo_values.max()),
-            "orbitalIndex": orbital_index,
-            "orbitalType": orbital_type,
-            "energy": float(cache["mo_energy"][orbital_index]),
-            "occupation": float(cache["mo_occ"][orbital_index]),
-            "homoIndex": homo_index,
-            "lumoIndex": lumo_index,
-            "numOrbitals": n_mo,
-            "comment": f"MO {orbital_index + 1} ({orbital_type})",
-        }
-
-        if mesh_mode:
-            mesh = compute_orbital_mesh(
-                mo_values.flatten(), cache["grid_shape"], gm, isovalue=iso_value
+        # Encode volume data
+        if use_binary:
+            volume_data, data_format = encode_orbital_binary(
+                mo_values.flatten(), compress=True
             )
-            result["dataFormat"] = "mesh"
-            result["mesh"] = mesh
         else:
-            # Encode volume data
-            if use_binary:
-                volume_data, data_format = encode_orbital_binary(
-                    mo_values.flatten(), compress=True
-                )
-            else:
-                volume_data = mo_values.flatten().tolist()
-                data_format = "json"
-            result["volumeData"] = volume_data
-            result["dataFormat"] = data_format
+            volume_data = mo_values.flatten().tolist()
+            data_format = "json"
 
-            # Build orbital list for frontend
-            orbitals_info = [
-                {
-                    "index": i,
-                    "energy": float(cache["mo_energy"][i]),
-                    "occupation": float(cache["mo_occ"][i]),
-                    "spin": "Alpha",
-                }
-                for i in range(n_mo)
-            ]
-            result["orbitals"] = orbitals_info
+        # Build orbital list for frontend
+        orbitals_info = [
+            {
+                "index": i,
+                "energy": float(cache["mo_energy"][i]),
+                "occupation": float(cache["mo_occ"][i]),
+                "spin": "Alpha",
+            }
+            for i in range(n_mo)
+        ]
 
-        return jsonify(result)
+        return jsonify(
+            {
+                "success": True,
+                "volumeData": volume_data,
+                "dataFormat": data_format,
+                "gridInfo": {
+                    "origin": {
+                        "x": gm["origin"][0],
+                        "y": gm["origin"][1],
+                        "z": gm["origin"][2],
+                    },
+                    "dimensions": gm["dimensions"],
+                    "spacing": sp,
+                    "vectors": {
+                        "x": [sp[0], 0, 0],
+                        "y": [0, sp[1], 0],
+                        "z": [0, 0, sp[2]],
+                    },
+                },
+                "minValue": float(mo_values.min()),
+                "maxValue": float(mo_values.max()),
+                "orbitalIndex": orbital_index,
+                "orbitalType": orbital_type,
+                "energy": float(cache["mo_energy"][orbital_index]),
+                "occupation": float(cache["mo_occ"][orbital_index]),
+                "homoIndex": homo_index,
+                "lumoIndex": lumo_index,
+                "numOrbitals": n_mo,
+                "orbitals": orbitals_info,
+                "comment": f"MO {orbital_index + 1} ({orbital_type})",
+            }
+        )
 
     except ImportError as e:
         return (
