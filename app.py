@@ -97,7 +97,9 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
 
     # Evict expired or overflow entries
     now = time()
-    expired = [k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL]
+    expired = [
+        k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL
+    ]
     for k in expired:
         del molden_cache[k]
     if len(molden_cache) >= MAX_MOLDEN_CACHE:
@@ -111,7 +113,9 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         tmp_path = tmp.name
 
     try:
-        mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(tmp_path)
+        mol, mo_energy, mo_coeff, mo_occ, irrep_labels, spins = pyscf_molden.load(
+            tmp_path
+        )
     finally:
         os.unlink(tmp_path)
 
@@ -142,9 +146,15 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
     lumo_index = n_occ if n_occ < n_mo else -1
 
     # Pre-compute torch tensors for GPU-accelerated batch MO computation
-    _torch_device = "cuda" if torch.cuda.is_available() else "cpu"
-    ao_tensor = torch.from_numpy(ao_values.astype(np.float32)).to(_torch_device)
-    coeff_tensor = torch.from_numpy(mo_coeff.astype(np.float32)).to(_torch_device)
+    try:
+        _torch_device = "cuda" if torch.cuda.is_available() else "cpu"
+        ao_tensor = torch.from_numpy(ao_values.astype(np.float32)).to(_torch_device)
+        coeff_tensor = torch.from_numpy(mo_coeff.astype(np.float32)).to(_torch_device)
+    except Exception as e:
+        print(f"⚠️ Torch tensor creation failed ({e}), falling back to numpy")
+        _torch_device = "numpy"
+        ao_tensor = None
+        coeff_tensor = None
 
     entry = {
         "mol": mol,
@@ -209,6 +219,7 @@ def encode_orbital_binary(mo_values_flat, compress=True):
         return base64.b64encode(compressed).decode(), "base64_float32_zlib"
     else:
         return base64.b64encode(raw_bytes).decode(), "base64_float32"
+
 
 # Global OpenAI client - reuses TCP connection
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -1282,15 +1293,34 @@ def evaluate_orbital():
             cache = get_molden_cache_by_key(cache_key_str)
         if cache is None:
             if not molden_content:
-                return jsonify({"error": "No moldenContent or valid cacheKey provided"}), 400
+                return (
+                    jsonify({"error": "No moldenContent or valid cacheKey provided"}),
+                    400,
+                )
             cache = get_or_create_molden_cache(molden_content, grid_size, padding)
 
         n_mo = cache["n_mo"]
         if orbital_index < 0 or orbital_index >= n_mo:
-            return jsonify({"error": f"Orbital index {orbital_index} out of range (0-{n_mo-1})"}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Orbital index {orbital_index} out of range (0-{n_mo-1})"
+                    }
+                ),
+                400,
+            )
 
-        # MO computation via torch (GPU-accelerated when available)
-        mo_values = torch.matmul(cache["ao_tensor"], cache["coeff_tensor"][:, orbital_index]).cpu().numpy()
+        # MO computation via torch (GPU-accelerated) or numpy fallback
+        if cache["ao_tensor"] is not None:
+            mo_values = (
+                torch.matmul(
+                    cache["ao_tensor"], cache["coeff_tensor"][:, orbital_index]
+                )
+                .cpu()
+                .numpy()
+            )
+        else:
+            mo_values = cache["ao_values"] @ cache["mo_coeff"][:, orbital_index]
         mo_values = mo_values.reshape(cache["grid_shape"])
 
         homo_index = cache["homo_index"]
@@ -1302,50 +1332,67 @@ def evaluate_orbital():
 
         # Encode volume data
         if use_binary:
-            volume_data, data_format = encode_orbital_binary(mo_values.flatten(), compress=True)
+            volume_data, data_format = encode_orbital_binary(
+                mo_values.flatten(), compress=True
+            )
         else:
             volume_data = mo_values.flatten().tolist()
             data_format = "json"
 
         # Build orbital list for frontend
         orbitals_info = [
-            {"index": i, "energy": float(cache["mo_energy"][i]),
-             "occupation": float(cache["mo_occ"][i]), "spin": "Alpha"}
+            {
+                "index": i,
+                "energy": float(cache["mo_energy"][i]),
+                "occupation": float(cache["mo_occ"][i]),
+                "spin": "Alpha",
+            }
             for i in range(n_mo)
         ]
 
-        return jsonify({
-            "success": True,
-            "volumeData": volume_data,
-            "dataFormat": data_format,
-            "gridInfo": {
-                "origin": {"x": gm["origin"][0], "y": gm["origin"][1], "z": gm["origin"][2]},
-                "dimensions": gm["dimensions"],
-                "spacing": sp,
-                "vectors": {
-                    "x": [sp[0], 0, 0],
-                    "y": [0, sp[1], 0],
-                    "z": [0, 0, sp[2]],
+        return jsonify(
+            {
+                "success": True,
+                "volumeData": volume_data,
+                "dataFormat": data_format,
+                "gridInfo": {
+                    "origin": {
+                        "x": gm["origin"][0],
+                        "y": gm["origin"][1],
+                        "z": gm["origin"][2],
+                    },
+                    "dimensions": gm["dimensions"],
+                    "spacing": sp,
+                    "vectors": {
+                        "x": [sp[0], 0, 0],
+                        "y": [0, sp[1], 0],
+                        "z": [0, 0, sp[2]],
+                    },
                 },
-            },
-            "minValue": float(mo_values.min()),
-            "maxValue": float(mo_values.max()),
-            "orbitalIndex": orbital_index,
-            "orbitalType": orbital_type,
-            "energy": float(cache["mo_energy"][orbital_index]),
-            "occupation": float(cache["mo_occ"][orbital_index]),
-            "homoIndex": homo_index,
-            "lumoIndex": lumo_index,
-            "numOrbitals": n_mo,
-            "orbitals": orbitals_info,
-            "comment": f"MO {orbital_index + 1} ({orbital_type})",
-        })
+                "minValue": float(mo_values.min()),
+                "maxValue": float(mo_values.max()),
+                "orbitalIndex": orbital_index,
+                "orbitalType": orbital_type,
+                "energy": float(cache["mo_energy"][orbital_index]),
+                "occupation": float(cache["mo_occ"][orbital_index]),
+                "homoIndex": homo_index,
+                "lumoIndex": lumo_index,
+                "numOrbitals": n_mo,
+                "orbitals": orbitals_info,
+                "comment": f"MO {orbital_index + 1} ({orbital_type})",
+            }
+        )
 
     except ImportError as e:
-        return jsonify({
-            "error": "PySCF not installed. Install with: pip install pyscf",
-            "details": str(e),
-        }), 500
+        return (
+            jsonify(
+                {
+                    "error": "PySCF not installed. Install with: pip install pyscf",
+                    "details": str(e),
+                }
+            ),
+            500,
+        )
     except Exception as e:
         print(f"❌ Molden orbital evaluation error: {str(e)}")
         traceback.print_exc()
@@ -1385,16 +1432,22 @@ def get_molden_info():
         for i in range(mol.natm):
             symbol = mol.atom_symbol(i)
             coord = mol.atom_coord(i)
-            atoms.append({
-                "element": symbol,
-                "x": coord[0] * BOHR_TO_ANG,
-                "y": coord[1] * BOHR_TO_ANG,
-                "z": coord[2] * BOHR_TO_ANG,
-            })
+            atoms.append(
+                {
+                    "element": symbol,
+                    "x": coord[0] * BOHR_TO_ANG,
+                    "y": coord[1] * BOHR_TO_ANG,
+                    "z": coord[2] * BOHR_TO_ANG,
+                }
+            )
 
         orbitals = [
-            {"index": i, "energy": float(mo_energy[i]),
-             "occupation": float(mo_occ[i]), "spin": "Alpha"}
+            {
+                "index": i,
+                "energy": float(mo_energy[i]),
+                "occupation": float(mo_occ[i]),
+                "spin": "Alpha",
+            }
             for i in range(n_mo)
         ]
 
@@ -1402,23 +1455,30 @@ def get_molden_info():
         if homo_index >= 0 and lumo_index >= 0 and lumo_index < n_mo:
             gap = float(mo_energy[lumo_index] - mo_energy[homo_index])
 
-        return jsonify({
-            "success": True,
-            "numAtoms": mol.natm,
-            "numOrbitals": n_mo,
-            "numOccupied": n_occ,
-            "homoIndex": homo_index,
-            "lumoIndex": lumo_index,
-            "homoLumoGap": gap,
-            "orbitals": orbitals,
-            "atoms": atoms,
-        })
+        return jsonify(
+            {
+                "success": True,
+                "numAtoms": mol.natm,
+                "numOrbitals": n_mo,
+                "numOccupied": n_occ,
+                "homoIndex": homo_index,
+                "lumoIndex": lumo_index,
+                "homoLumoGap": gap,
+                "orbitals": orbitals,
+                "atoms": atoms,
+            }
+        )
 
     except ImportError as e:
-        return jsonify({
-            "error": "PySCF not installed. Install with: pip install pyscf",
-            "details": str(e),
-        }), 500
+        return (
+            jsonify(
+                {
+                    "error": "PySCF not installed. Install with: pip install pyscf",
+                    "details": str(e),
+                }
+            ),
+            500,
+        )
     except Exception as e:
         print(f"❌ Molden info error: {str(e)}")
         traceback.print_exc()
@@ -1455,8 +1515,12 @@ def prepare_molden():
         mo_occ = cache["mo_occ"]
 
         orbitals = [
-            {"index": i, "energy": float(mo_energy[i]),
-             "occupation": float(mo_occ[i]), "spin": "Alpha"}
+            {
+                "index": i,
+                "energy": float(mo_energy[i]),
+                "occupation": float(mo_occ[i]),
+                "spin": "Alpha",
+            }
             for i in range(n_mo)
         ]
 
@@ -1464,17 +1528,21 @@ def prepare_molden():
         if homo_index >= 0 and lumo_index >= 0 and lumo_index < n_mo:
             gap = float(mo_energy[lumo_index] - mo_energy[homo_index])
 
-        print(f"✅ Molden prepared: {n_mo} MOs, cache_key={cache_key}, device={cache['torch_device']}")
+        print(
+            f"✅ Molden prepared: {n_mo} MOs, cache_key={cache_key}, device={cache['torch_device']}"
+        )
 
-        return jsonify({
-            "success": True,
-            "cacheKey": cache_key,
-            "numOrbitals": n_mo,
-            "homoIndex": homo_index,
-            "lumoIndex": lumo_index,
-            "homoLumoGap": gap,
-            "orbitals": orbitals,
-        })
+        return jsonify(
+            {
+                "success": True,
+                "cacheKey": cache_key,
+                "numOrbitals": n_mo,
+                "homoIndex": homo_index,
+                "lumoIndex": lumo_index,
+                "homoLumoGap": gap,
+                "orbitals": orbitals,
+            }
+        )
 
     except Exception as e:
         traceback.print_exc()
@@ -1511,9 +1579,16 @@ def evaluate_orbital_batch():
         if cache is None:
             if not molden_content:
                 return Response(
-                    orjson.dumps({"type": "error", "error": "No moldenContent or valid cacheKey provided"}).decode() + "\n",
+                    orjson.dumps(
+                        {
+                            "type": "error",
+                            "error": "No moldenContent or valid cacheKey provided",
+                        }
+                    ).decode()
+                    + "\n",
                     status=400,
                     mimetype="application/x-ndjson",
+                    headers={"Access-Control-Allow-Origin": "*"},
                 )
             cache = get_or_create_molden_cache(molden_content, grid_size, padding)
     except Exception as e:
@@ -1522,6 +1597,7 @@ def evaluate_orbital_batch():
             orjson.dumps({"type": "error", "error": str(e)}).decode() + "\n",
             status=500,
             mimetype="application/x-ndjson",
+            headers={"Access-Control-Allow-Origin": "*"},
         )
 
     n_mo = cache["n_mo"]
@@ -1556,7 +1632,11 @@ def evaluate_orbital_batch():
             "homoIndex": homo_index,
             "lumoIndex": lumo_index,
             "gridInfo": {
-                "origin": {"x": gm["origin"][0], "y": gm["origin"][1], "z": gm["origin"][2]},
+                "origin": {
+                    "x": gm["origin"][0],
+                    "y": gm["origin"][1],
+                    "z": gm["origin"][2],
+                },
                 "dimensions": gm["dimensions"],
                 "spacing": sp,
                 "vectors": {
@@ -1568,14 +1648,25 @@ def evaluate_orbital_batch():
         }
         yield orjson.dumps(meta).decode() + "\n"
 
-        # === Batch GEMM: compute ALL requested orbitals in one GPU/CPU call ===
+        # === Batch compute: GPU torch.matmul or numpy fallback ===
         try:
-            indices_tensor = torch.tensor(orbital_indices, dtype=torch.long)
-            coeff_subset = cache["coeff_tensor"][:, indices_tensor]  # (n_ao, n_requested)
-            all_mo_values = torch.matmul(cache["ao_tensor"], coeff_subset).cpu().numpy()
+            if cache["ao_tensor"] is not None:
+                indices_tensor = torch.tensor(orbital_indices, dtype=torch.long)
+                coeff_subset = cache["coeff_tensor"][
+                    :, indices_tensor
+                ]  # (n_ao, n_requested)
+                all_mo_values = (
+                    torch.matmul(cache["ao_tensor"], coeff_subset).cpu().numpy()
+                )
+            else:
+                # Numpy fallback: batch matrix multiply
+                coeff_subset = cache["mo_coeff"][:, orbital_indices]
+                all_mo_values = cache["ao_values"] @ coeff_subset
             # all_mo_values shape: (n_grid_points, n_requested)
         except Exception as e:
-            yield orjson.dumps({"type": "error", "error": f"Batch GEMM failed: {e}"}).decode() + "\n"
+            yield orjson.dumps(
+                {"type": "error", "error": f"Batch MO compute failed: {e}"}
+            ).decode() + "\n"
             return
 
         grid_shape = cache["grid_shape"]
@@ -1606,15 +1697,23 @@ def evaluate_orbital_batch():
         with ThreadPoolExecutor(max_workers=batch_size) as pool:
             for batch_start in range(0, len(orbital_indices), batch_size):
                 batch_end = min(batch_start + batch_size, len(orbital_indices))
-                futures = [pool.submit(compress_one, i) for i in range(batch_start, batch_end)]
+                futures = [
+                    pool.submit(compress_one, i) for i in range(batch_start, batch_end)
+                ]
                 for future in futures:
                     try:
                         result = future.result()
                         yield orjson.dumps(result).decode() + "\n"
                     except Exception as e:
-                        yield orjson.dumps({"type": "error", "error": str(e)}).decode() + "\n"
+                        yield orjson.dumps(
+                            {"type": "error", "error": str(e)}
+                        ).decode() + "\n"
 
-    return Response(generate(), mimetype="application/x-ndjson")
+    return Response(
+        generate(),
+        mimetype="application/x-ndjson",
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ============================================================================
