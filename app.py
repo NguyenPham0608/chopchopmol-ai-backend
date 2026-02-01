@@ -177,6 +177,37 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         "last_access": time(),
     }
     molden_cache[cache_key] = entry
+
+    # Pre-compute HOMO/LUMO MO values in background so they're ready for batch requests
+    import threading
+
+    def _precompute_key_orbitals():
+        try:
+            key_indices = []
+            if 0 <= homo_index < n_mo:
+                key_indices.append(homo_index)
+            if 0 <= lumo_index < n_mo:
+                key_indices.append(lumo_index)
+            if not key_indices:
+                return
+
+            if ao_tensor is not None:
+                idx_t = torch.tensor(key_indices, dtype=torch.long)
+                coeff_sub = coeff_tensor[:, idx_t]
+                mo_vals = torch.matmul(ao_tensor, coeff_sub).cpu().numpy()
+            else:
+                coeff_sub = mo_coeff[:, key_indices]
+                mo_vals = ao_values @ coeff_sub
+
+            # Store pre-computed MO values in the cache entry
+            entry["precomputed_mo"] = {
+                key_indices[i]: mo_vals[:, i].copy() for i in range(len(key_indices))
+            }
+        except Exception as e:
+            print(f"⚠️ Background HOMO/LUMO precompute failed: {e}")
+
+    threading.Thread(target=_precompute_key_orbitals, daemon=True).start()
+
     return entry
 
 
@@ -219,6 +250,70 @@ def encode_orbital_binary(mo_values_flat, compress=True):
         return base64.b64encode(compressed).decode(), "base64_float32_zlib"
     else:
         return base64.b64encode(raw_bytes).decode(), "base64_float32"
+
+
+def encode_mesh_binary(vertices, normals, compress=True):
+    """Encode mesh vertices and normals as base64, optionally with zlib compression."""
+    verts_bytes = vertices.astype(np.float32).tobytes()
+    norms_bytes = normals.astype(np.float32).tobytes()
+    if compress:
+        return (
+            base64.b64encode(zlib.compress(verts_bytes, level=1)).decode(),
+            base64.b64encode(zlib.compress(norms_bytes, level=1)).decode(),
+        )
+    else:
+        return (
+            base64.b64encode(verts_bytes).decode(),
+            base64.b64encode(norms_bytes).decode(),
+        )
+
+
+def compute_orbital_mesh(mo_values_flat, grid_shape, grid_meta, isovalue=0.02):
+    """Run marching cubes on orbital volume data, return mesh for positive and negative phases.
+
+    Returns dict with 'positive' and 'negative' keys, each containing
+    compressed base64 vertices/normals, or None if no surface found.
+    """
+    from skimage.measure import marching_cubes
+
+    mo_3d = mo_values_flat.reshape(grid_shape)
+    origin = np.array(grid_meta["origin"])
+    spacing = np.array(grid_meta["spacing"])
+
+    result = {"positive": None, "negative": None}
+
+    for phase, iso in [("positive", isovalue), ("negative", -isovalue)]:
+        try:
+            verts, faces, norms, _ = marching_cubes(
+                mo_3d, level=iso, spacing=tuple(spacing)
+            )
+        except (ValueError, RuntimeError):
+            # No surface at this isovalue
+            continue
+
+        if len(verts) == 0:
+            continue
+
+        # Shift vertices to world coordinates
+        verts = verts + origin
+
+        # Flip normals for negative phase
+        if phase == "negative":
+            norms = -norms
+
+        # Expand indexed faces to flat triangle list (3 verts per triangle)
+        tri_verts = verts[faces.ravel()].astype(np.float32)
+        tri_norms = norms[faces.ravel()].astype(np.float32)
+
+        verts_b64, norms_b64 = encode_mesh_binary(tri_verts.ravel(), tri_norms.ravel())
+        result[phase] = {
+            "vertices": verts_b64,
+            "normals": norms_b64,
+            "numVertices": len(tri_verts),
+            "numTriangles": len(faces),
+        }
+
+    return result
 
 
 # Global OpenAI client - reuses TCP connection
@@ -1285,6 +1380,8 @@ def evaluate_orbital():
     grid_size = data.get("gridSize", 50)
     padding = data.get("padding", 4.0)
     use_binary = data.get("binary", False)
+    mesh_mode = data.get("meshMode", False)
+    iso_value = data.get("isoValue", 0.02)
 
     try:
         # Resolve cache: prefer cacheKey (no re-upload), fall back to moldenContent
@@ -1330,58 +1427,67 @@ def evaluate_orbital():
         gm = cache["grid_meta"]
         sp = gm["spacing"]
 
-        # Encode volume data
-        if use_binary:
-            volume_data, data_format = encode_orbital_binary(
-                mo_values.flatten(), compress=True
+        grid_info = {
+            "origin": {
+                "x": gm["origin"][0],
+                "y": gm["origin"][1],
+                "z": gm["origin"][2],
+            },
+            "dimensions": gm["dimensions"],
+            "spacing": sp,
+            "vectors": {
+                "x": [sp[0], 0, 0],
+                "y": [0, sp[1], 0],
+                "z": [0, 0, sp[2]],
+            },
+        }
+
+        result = {
+            "success": True,
+            "gridInfo": grid_info,
+            "minValue": float(mo_values.min()),
+            "maxValue": float(mo_values.max()),
+            "orbitalIndex": orbital_index,
+            "orbitalType": orbital_type,
+            "energy": float(cache["mo_energy"][orbital_index]),
+            "occupation": float(cache["mo_occ"][orbital_index]),
+            "homoIndex": homo_index,
+            "lumoIndex": lumo_index,
+            "numOrbitals": n_mo,
+            "comment": f"MO {orbital_index + 1} ({orbital_type})",
+        }
+
+        if mesh_mode:
+            mesh = compute_orbital_mesh(
+                mo_values.flatten(), cache["grid_shape"], gm, isovalue=iso_value
             )
+            result["dataFormat"] = "mesh"
+            result["mesh"] = mesh
         else:
-            volume_data = mo_values.flatten().tolist()
-            data_format = "json"
+            # Encode volume data
+            if use_binary:
+                volume_data, data_format = encode_orbital_binary(
+                    mo_values.flatten(), compress=True
+                )
+            else:
+                volume_data = mo_values.flatten().tolist()
+                data_format = "json"
+            result["volumeData"] = volume_data
+            result["dataFormat"] = data_format
 
-        # Build orbital list for frontend
-        orbitals_info = [
-            {
-                "index": i,
-                "energy": float(cache["mo_energy"][i]),
-                "occupation": float(cache["mo_occ"][i]),
-                "spin": "Alpha",
-            }
-            for i in range(n_mo)
-        ]
+            # Build orbital list for frontend
+            orbitals_info = [
+                {
+                    "index": i,
+                    "energy": float(cache["mo_energy"][i]),
+                    "occupation": float(cache["mo_occ"][i]),
+                    "spin": "Alpha",
+                }
+                for i in range(n_mo)
+            ]
+            result["orbitals"] = orbitals_info
 
-        return jsonify(
-            {
-                "success": True,
-                "volumeData": volume_data,
-                "dataFormat": data_format,
-                "gridInfo": {
-                    "origin": {
-                        "x": gm["origin"][0],
-                        "y": gm["origin"][1],
-                        "z": gm["origin"][2],
-                    },
-                    "dimensions": gm["dimensions"],
-                    "spacing": sp,
-                    "vectors": {
-                        "x": [sp[0], 0, 0],
-                        "y": [0, sp[1], 0],
-                        "z": [0, 0, sp[2]],
-                    },
-                },
-                "minValue": float(mo_values.min()),
-                "maxValue": float(mo_values.max()),
-                "orbitalIndex": orbital_index,
-                "orbitalType": orbital_type,
-                "energy": float(cache["mo_energy"][orbital_index]),
-                "occupation": float(cache["mo_occ"][orbital_index]),
-                "homoIndex": homo_index,
-                "lumoIndex": lumo_index,
-                "numOrbitals": n_mo,
-                "orbitals": orbitals_info,
-                "comment": f"MO {orbital_index + 1} ({orbital_type})",
-            }
-        )
+        return jsonify(result)
 
     except ImportError as e:
         return (
@@ -1570,6 +1676,8 @@ def evaluate_orbital_batch():
     grid_size = data.get("gridSize", 50)
     padding = data.get("padding", 4.0)
     orbital_indices = data.get("orbitalIndices")  # None = all
+    mesh_mode = data.get("meshMode", False)  # If true, return mesh instead of volume
+    iso_value = data.get("isoValue", 0.02)  # Isovalue for mesh mode
 
     try:
         # Resolve cache: prefer cacheKey (no re-upload), fall back to moldenContent
@@ -1627,6 +1735,7 @@ def evaluate_orbital_batch():
         # First line: metadata
         meta = {
             "type": "meta",
+            "meshMode": mesh_mode,
             "numOrbitals": n_mo,
             "totalRequested": len(orbital_indices),
             "homoIndex": homo_index,
@@ -1674,17 +1783,15 @@ def evaluate_orbital_batch():
         mo_occ = cache["mo_occ"]
 
         # === Parallel compression + streaming ===
-        def compress_one(i):
-            """Compress a single orbital's volume data."""
+        def process_one(i):
+            """Process a single orbital: compress volume or compute mesh."""
             mo_flat = all_mo_values[:, i].copy()
             mo_3d = mo_flat.reshape(grid_shape)
-            encoded, data_format = encode_orbital_binary(mo_flat, compress=True)
             idx = orbital_indices[i]
-            return {
+
+            base = {
                 "type": "orbital",
                 "orbitalIndex": idx,
-                "volumeData": encoded,
-                "dataFormat": data_format,
                 "minValue": float(mo_3d.min()),
                 "maxValue": float(mo_3d.max()),
                 "orbitalType": compute_orbital_type(idx, homo_index, lumo_index),
@@ -1692,13 +1799,24 @@ def evaluate_orbital_batch():
                 "occupation": float(mo_occ[idx]),
             }
 
+            if mesh_mode:
+                mesh = compute_orbital_mesh(mo_flat, grid_shape, gm, isovalue=iso_value)
+                base["dataFormat"] = "mesh"
+                base["mesh"] = mesh
+            else:
+                encoded, data_format = encode_orbital_binary(mo_flat, compress=True)
+                base["volumeData"] = encoded
+                base["dataFormat"] = data_format
+
+            return base
+
         # Process in batches of 4 for parallel compression while maintaining streaming
         batch_size = 4
         with ThreadPoolExecutor(max_workers=batch_size) as pool:
             for batch_start in range(0, len(orbital_indices), batch_size):
                 batch_end = min(batch_start + batch_size, len(orbital_indices))
                 futures = [
-                    pool.submit(compress_one, i) for i in range(batch_start, batch_end)
+                    pool.submit(process_one, i) for i in range(batch_start, batch_end)
                 ]
                 for future in futures:
                     try:
@@ -2003,6 +2121,7 @@ def remote_status():
             return jsonify({"connected": False})
 
 
+print(f"Torch device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 # ============================================================================
 
 if __name__ == "__main__":
