@@ -141,12 +141,20 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
     homo_index = n_occ - 1 if n_occ > 0 else -1
     lumo_index = n_occ if n_occ < n_mo else -1
 
+    # Pre-compute torch tensors for GPU-accelerated batch MO computation
+    _torch_device = "cuda" if torch.cuda.is_available() else "cpu"
+    ao_tensor = torch.from_numpy(ao_values.astype(np.float32)).to(_torch_device)
+    coeff_tensor = torch.from_numpy(mo_coeff.astype(np.float32)).to(_torch_device)
+
     entry = {
         "mol": mol,
         "mo_coeff": mo_coeff,
         "mo_energy": mo_energy,
         "mo_occ": mo_occ,
         "ao_values": ao_values,
+        "ao_tensor": ao_tensor,
+        "coeff_tensor": coeff_tensor,
+        "torch_device": _torch_device,
         "grid_shape": X.shape,
         "grid_meta": {
             "origin": [x[0] * BOHR_TO_ANG, y[0] * BOHR_TO_ANG, z[0] * BOHR_TO_ANG],
@@ -159,6 +167,24 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         "last_access": time(),
     }
     molden_cache[cache_key] = entry
+    return entry
+
+
+def get_molden_cache_by_key(cache_key_str):
+    """Resolve a cacheKey string (from /prepare) back to cached data.
+    cacheKey format: '{content_hash}_{gridSize}_{padding}'
+    """
+    parts = cache_key_str.rsplit("_", 2)
+    if len(parts) != 3:
+        return None
+    content_hash, grid_size_str, padding_str = parts
+    try:
+        key = (content_hash, int(grid_size_str), float(padding_str))
+    except ValueError:
+        return None
+    entry = molden_cache.get(key)
+    if entry:
+        entry["last_access"] = time()
     return entry
 
 
@@ -850,7 +876,8 @@ def optimize_geometry():
         }
 
         mace_model = model_map.get(model_name, "medium")
-        calc = mace_mp(model=mace_model, device="cpu", default_dtype="float64")
+        _opt_device = "cuda" if torch.cuda.is_available() else "cpu"
+        calc = mace_mp(model=mace_model, device=_opt_device, default_dtype="float64")
         atoms.calc = calc
 
         # Store trajectory frames
@@ -1241,24 +1268,29 @@ def evaluate_orbital():
     import traceback
 
     data = request.json
+    cache_key_str = data.get("cacheKey")
     molden_content = data.get("moldenContent")
     orbital_index = data.get("orbitalIndex", 0)
     grid_size = data.get("gridSize", 50)
     padding = data.get("padding", 4.0)
     use_binary = data.get("binary", False)
 
-    if not molden_content:
-        return jsonify({"error": "No molden content provided"}), 400
-
     try:
-        cache = get_or_create_molden_cache(molden_content, grid_size, padding)
+        # Resolve cache: prefer cacheKey (no re-upload), fall back to moldenContent
+        cache = None
+        if cache_key_str:
+            cache = get_molden_cache_by_key(cache_key_str)
+        if cache is None:
+            if not molden_content:
+                return jsonify({"error": "No moldenContent or valid cacheKey provided"}), 400
+            cache = get_or_create_molden_cache(molden_content, grid_size, padding)
 
         n_mo = cache["n_mo"]
         if orbital_index < 0 or orbital_index >= n_mo:
             return jsonify({"error": f"Orbital index {orbital_index} out of range (0-{n_mo-1})"}), 400
 
-        # MO computation: just a dot product with cached AO grid
-        mo_values = cache["ao_values"] @ cache["mo_coeff"][:, orbital_index]
+        # MO computation via torch (GPU-accelerated when available)
+        mo_values = torch.matmul(cache["ao_tensor"], cache["coeff_tensor"][:, orbital_index]).cpu().numpy()
         mo_values = mo_values.reshape(cache["grid_shape"])
 
         homo_index = cache["homo_index"]
@@ -1393,15 +1425,12 @@ def get_molden_info():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
-@app.route("/ai/molden/orbital-batch", methods=["POST"])
-def evaluate_orbital_batch():
+@app.route("/ai/molden/prepare", methods=["POST"])
+def prepare_molden():
     """
-    Compute multiple (or all) orbitals in a single request.
-    Streams results as NDJSON (one JSON object per line) so the frontend can
-    update a progress bar and cache each orbital as it arrives.
-
-    The AO grid is evaluated once and cached; each orbital is just a fast
-    matrix-vector multiply (~10ms per orbital).
+    Upload molden content once, compute and cache AO grid, return a cacheKey.
+    Subsequent /orbital and /orbital-batch requests can use cacheKey instead of
+    re-uploading the full molden content, saving significant bandwidth on remote backends.
     """
     import traceback
 
@@ -1409,17 +1438,84 @@ def evaluate_orbital_batch():
     molden_content = data.get("moldenContent")
     grid_size = data.get("gridSize", 50)
     padding = data.get("padding", 4.0)
-    orbital_indices = data.get("orbitalIndices")  # None = all
 
     if not molden_content:
-        return Response(
-            orjson.dumps({"type": "error", "error": "No molden content provided"}).decode() + "\n",
-            status=400,
-            mimetype="application/x-ndjson",
-        )
+        return jsonify({"error": "No molden content provided"}), 400
 
     try:
         cache = get_or_create_molden_cache(molden_content, grid_size, padding)
+
+        content_hash = hashlib.sha256(molden_content.encode()).hexdigest()[:16]
+        cache_key = f"{content_hash}_{grid_size}_{padding}"
+
+        n_mo = cache["n_mo"]
+        homo_index = cache["homo_index"]
+        lumo_index = cache["lumo_index"]
+        mo_energy = cache["mo_energy"]
+        mo_occ = cache["mo_occ"]
+
+        orbitals = [
+            {"index": i, "energy": float(mo_energy[i]),
+             "occupation": float(mo_occ[i]), "spin": "Alpha"}
+            for i in range(n_mo)
+        ]
+
+        gap = None
+        if homo_index >= 0 and lumo_index >= 0 and lumo_index < n_mo:
+            gap = float(mo_energy[lumo_index] - mo_energy[homo_index])
+
+        print(f"✅ Molden prepared: {n_mo} MOs, cache_key={cache_key}, device={cache['torch_device']}")
+
+        return jsonify({
+            "success": True,
+            "cacheKey": cache_key,
+            "numOrbitals": n_mo,
+            "homoIndex": homo_index,
+            "lumoIndex": lumo_index,
+            "homoLumoGap": gap,
+            "orbitals": orbitals,
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/molden/orbital-batch", methods=["POST"])
+def evaluate_orbital_batch():
+    """
+    Compute multiple (or all) orbitals in a single request.
+    Streams results as NDJSON (one JSON object per line) so the frontend can
+    update a progress bar and cache each orbital as it arrives.
+
+    Optimizations over naive approach:
+    - Accepts cacheKey to avoid re-uploading molden content
+    - Single batch torch.matmul on GPU computes ALL orbitals at once
+    - Parallel zlib compression via ThreadPoolExecutor
+    """
+    import traceback
+    from concurrent.futures import ThreadPoolExecutor
+
+    data = request.json
+    cache_key_str = data.get("cacheKey")
+    molden_content = data.get("moldenContent")
+    grid_size = data.get("gridSize", 50)
+    padding = data.get("padding", 4.0)
+    orbital_indices = data.get("orbitalIndices")  # None = all
+
+    try:
+        # Resolve cache: prefer cacheKey (no re-upload), fall back to moldenContent
+        cache = None
+        if cache_key_str:
+            cache = get_molden_cache_by_key(cache_key_str)
+        if cache is None:
+            if not molden_content:
+                return Response(
+                    orjson.dumps({"type": "error", "error": "No moldenContent or valid cacheKey provided"}).decode() + "\n",
+                    status=400,
+                    mimetype="application/x-ndjson",
+                )
+            cache = get_or_create_molden_cache(molden_content, grid_size, padding)
     except Exception as e:
         traceback.print_exc()
         return Response(
@@ -1472,27 +1568,51 @@ def evaluate_orbital_batch():
         }
         yield orjson.dumps(meta).decode() + "\n"
 
-        for idx in orbital_indices:
-            try:
-                mo_values = cache["ao_values"] @ cache["mo_coeff"][:, idx]
-                mo_values = mo_values.reshape(cache["grid_shape"])
+        # === Batch GEMM: compute ALL requested orbitals in one GPU/CPU call ===
+        try:
+            indices_tensor = torch.tensor(orbital_indices, dtype=torch.long)
+            coeff_subset = cache["coeff_tensor"][:, indices_tensor]  # (n_ao, n_requested)
+            all_mo_values = torch.matmul(cache["ao_tensor"], coeff_subset).cpu().numpy()
+            # all_mo_values shape: (n_grid_points, n_requested)
+        except Exception as e:
+            yield orjson.dumps({"type": "error", "error": f"Batch GEMM failed: {e}"}).decode() + "\n"
+            return
 
-                encoded, data_format = encode_orbital_binary(mo_values.flatten(), compress=True)
+        grid_shape = cache["grid_shape"]
+        mo_energy = cache["mo_energy"]
+        mo_occ = cache["mo_occ"]
 
-                result = {
-                    "type": "orbital",
-                    "orbitalIndex": idx,
-                    "volumeData": encoded,
-                    "dataFormat": data_format,
-                    "minValue": float(mo_values.min()),
-                    "maxValue": float(mo_values.max()),
-                    "orbitalType": compute_orbital_type(idx, homo_index, lumo_index),
-                    "energy": float(cache["mo_energy"][idx]),
-                    "occupation": float(cache["mo_occ"][idx]),
-                }
-                yield orjson.dumps(result).decode() + "\n"
-            except Exception as e:
-                yield orjson.dumps({"type": "error", "orbitalIndex": idx, "error": str(e)}).decode() + "\n"
+        # === Parallel compression + streaming ===
+        def compress_one(i):
+            """Compress a single orbital's volume data."""
+            mo_flat = all_mo_values[:, i].copy()
+            mo_3d = mo_flat.reshape(grid_shape)
+            encoded, data_format = encode_orbital_binary(mo_flat, compress=True)
+            idx = orbital_indices[i]
+            return {
+                "type": "orbital",
+                "orbitalIndex": idx,
+                "volumeData": encoded,
+                "dataFormat": data_format,
+                "minValue": float(mo_3d.min()),
+                "maxValue": float(mo_3d.max()),
+                "orbitalType": compute_orbital_type(idx, homo_index, lumo_index),
+                "energy": float(mo_energy[idx]),
+                "occupation": float(mo_occ[idx]),
+            }
+
+        # Process in batches of 4 for parallel compression while maintaining streaming
+        batch_size = 4
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            for batch_start in range(0, len(orbital_indices), batch_size):
+                batch_end = min(batch_start + batch_size, len(orbital_indices))
+                futures = [pool.submit(compress_one, i) for i in range(batch_start, batch_end)]
+                for future in futures:
+                    try:
+                        result = future.result()
+                        yield orjson.dumps(result).decode() + "\n"
+                    except Exception as e:
+                        yield orjson.dumps({"type": "error", "error": str(e)}).decode() + "\n"
 
     return Response(generate(), mimetype="application/x-ndjson")
 
