@@ -13,6 +13,7 @@ import zlib
 from io import BytesIO
 from time import time
 import torch
+import httpx
 
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
@@ -375,7 +376,8 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"set_angle","description":"Set the bond angle between 3 selected atoms to a specific value. Select exactly 3 atoms in order: A-B-C where B is the vertex atom. Rotates the fragment on atom A's side.","parameters":{"type":"object","properties":{"angle":{"type":"number","description":"Target angle in degrees (0-180)"}},"required":["angle"]}}},
   {"type":"function","function":{"name":"angle_scan","description":"Perform an angle scan: rotate a fragment around an axis perpendicular to the plane formed by 3 atoms through a range of angles. B is the pivot point.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom index (0-indexed)"},"atom2":{"type":"integer","description":"Vertex/pivot atom index (0-indexed)"},"atom3":{"type":"integer","description":"Third atom index (0-indexed)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Array of atom indices to rotate (0-indexed)"},"increment":{"type":"number","description":"Step size in degrees (default: 10)"},"startAngle":{"type":"number","description":"Starting angle in degrees (default: 0)"},"endAngle":{"type":"number","description":"Ending angle in degrees (default: 360)"}},"required":["atom1","atom2","atom3"]}}},
   {"type":"function","function":{"name":"toggle_force_arrows","description":"Toggle visualization of force vectors on atoms. Shows arrows indicating direction and magnitude of forces from the last energy calculation. Green=low force, red=high force. Requires energy calculation first.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"toggle_charge_visualization","description":"Toggle charge-based atom coloring and/or charge labels. Colors atoms by partial charge (red=negative, blue=positive). Requires a molecule with charge data (from ORCA .out files or other sources).","parameters":{"type":"object","properties":{"showColors":{"type":"boolean","description":"Enable/disable charge-based atom coloring (red=negative, blue=positive)"},"showLabels":{"type":"boolean","description":"Enable/disable charge value labels on atoms"},"chargeType":{"type":"string","enum":["mulliken","loewdin"],"description":"Type of charges to display (default: mulliken)"}},"required":[]}}}
+  {"type":"function","function":{"name":"toggle_charge_visualization","description":"Toggle charge-based atom coloring and/or charge labels. Colors atoms by partial charge (red=negative, blue=positive). Requires a molecule with charge data (from ORCA .out files or other sources).","parameters":{"type":"object","properties":{"showColors":{"type":"boolean","description":"Enable/disable charge-based atom coloring (red=negative, blue=positive)"},"showLabels":{"type":"boolean","description":"Enable/disable charge value labels on atoms"},"chargeType":{"type":"string","enum":["mulliken","loewdin"],"description":"Type of charges to display (default: mulliken)"}},"required":[]}}},
+  {"type":"function","function":{"name":"web_search","description":"Search the web for chemistry, molecular, or scientific information. Use when the user asks about properties, reactions, SMILES, safety data, or anything you don't know. Returns relevant snippets and an AI-generated answer.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. 'boiling point of ethanol', 'SMILES of aspirin', 'caffeine molecular weight')"},"search_depth":{"type":"string","enum":["basic","advanced"],"description":"basic (fast, 1 credit) or advanced (thorough, 2 credits). Default: basic"},"max_results":{"type":"integer","description":"Number of results to return (1-10, default: 5)"},"topic":{"type":"string","enum":["general","news"],"description":"Search topic. Default: general"}},"required":["query"]}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -439,6 +441,7 @@ TOOLS:
 - Energy: calculate_energy, calculate_all_energies, optimize_geometry, get_cached_energies
 - View: toggle_labels, toggle_charge_visualization, set_style, create_chart, save_file
 - Measure: measure_distance, measure_angle, measure_dihedral
+- Knowledge: web_search (search the web for chemistry info, properties, SMILES, safety data, etc.) 
 
 RULES:
 1. Min tool calls, but use as needed.
@@ -446,7 +449,10 @@ RULES:
 3. ALWAYS ask user for MACE model (mace-mp-0a/0b3/mpa-0) UNLESS SPECIFIED FROM THE USER
 4. After optimize: get_cached_energies (don't recalc)
 5. Brief responses (1-2 sentences)
-6. Use cached energies if hasMaceCache=Y BUT JUST USED THE ENERGIES YOU ALREADY CALCULATED IF YOU JUST RAN A CALCULATION."""
+6. Use cached energies if hasMaceCache=Y BUT JUST USED THE ENERGIES YOU ALREADY CALCULATED IF YOU JUST RAN A CALCULATION.
+7. If the user asks about molecular properties, safety data, SMILES, reactions, or anything you're unsure about, use web_search to look it up. Don't guess - search first.
+8. For general knowledge you already know (e.g. "what's 2+2?"), just answer directly without searching.
+"""
 
 
 @app.route("/health", methods=["GET"])
@@ -1328,6 +1334,99 @@ def clear_history():
     if session_id in sessions:
         del sessions[session_id]  # Fully remove, don't just empty
     return jsonify({"success": True})
+
+
+# --- Web Search (Tavily API) ---
+_search_cache = {}  # {query_hash: {"result": ..., "time": timestamp}}
+SEARCH_CACHE_TTL = 300  # 5 minutes
+SEARCH_CACHE_MAX = 200
+
+
+@app.route("/ai/knowledge/search", methods=["POST"])
+def knowledge_search():
+    """Search the web using Tavily API for chemistry/science queries."""
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if not tavily_key:
+        return jsonify({"error": "TAVILY_API_KEY not configured"}), 500
+
+    data = request.json or {}
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
+
+    search_depth = data.get("search_depth", "basic")
+    max_results = min(data.get("max_results", 5), 10)
+    topic = data.get("topic", "general")
+
+    # Check cache
+    cache_key = hashlib.md5(
+        f"{query}:{search_depth}:{max_results}".encode()
+    ).hexdigest()
+    now = time()
+    if cache_key in _search_cache:
+        cached = _search_cache[cache_key]
+        if now - cached["time"] < SEARCH_CACHE_TTL:
+            print(f"🔍 Search cache hit: {query[:50]}", flush=True)
+            return jsonify(cached["result"])
+
+    # Evict expired entries
+    expired = [
+        k for k, v in _search_cache.items() if now - v["time"] > SEARCH_CACHE_TTL
+    ]
+    for k in expired:
+        del _search_cache[k]
+    if len(_search_cache) >= SEARCH_CACHE_MAX:
+        oldest = min(_search_cache, key=lambda k: _search_cache[k]["time"])
+        del _search_cache[oldest]
+
+    try:
+        print(f"🔍 Web search: {query[:80]} (depth={search_depth})", flush=True)
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            headers={
+                "Authorization": f"Bearer {tavily_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "query": query,
+                "search_depth": search_depth,
+                "max_results": max_results,
+                "topic": topic,
+                "include_answer": True,
+            },
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        tavily_data = resp.json()
+
+        result = {
+            "success": True,
+            "answer": tavily_data.get("answer", ""),
+            "results": [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "content": r.get("content", "")[:500],
+                }
+                for r in tavily_data.get("results", [])[:max_results]
+            ],
+            "query": query,
+        }
+
+        # Cache result
+        _search_cache[cache_key] = {"result": result, "time": now}
+        print(f"✅ Search returned {len(result['results'])} results", flush=True)
+        return jsonify(result)
+
+    except httpx.HTTPStatusError as e:
+        print(f"❌ Tavily API error: {e.response.status_code}", flush=True)
+        return jsonify({"error": f"Search API error: {e.response.status_code}"}), 502
+    except httpx.TimeoutException:
+        print("❌ Tavily API timeout", flush=True)
+        return jsonify({"error": "Search timed out"}), 504
+    except Exception as e:
+        print(f"❌ Search error: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ai/transcribe", methods=["POST"])
