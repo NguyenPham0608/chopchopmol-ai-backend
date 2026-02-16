@@ -757,9 +757,13 @@ def chat_stream():
                 # Repair history specifically for Claude's strict pairing requirement
                 repaired_history = repair_claude_history_for_tool_pairing(history_slice)
                 claude_messages = convert_to_claude_messages(repaired_history)
+                # Extended thinking for supported models
+                supports_thinking = any(
+                    x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"]
+                )
                 call_params = {
                     "model": model,
-                    "max_tokens": 4096,  # Reduced from 8192 for faster responses
+                    "max_tokens": 16000 if supports_thinking else 4096,
                     "messages": claude_messages,
                     "system": [
                         {
@@ -771,6 +775,11 @@ def chat_stream():
                     "tools": CLAUDE_TOOLS if TOOLS else None,
                     "stream": True,
                 }
+                if supports_thinking:
+                    call_params["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 4096,
+                    }
             else:
                 # Original OpenAI params
                 call_params = {
@@ -811,7 +820,13 @@ def chat_stream():
                 if is_claude:
                     if chunk.type == "content_block_start":
                         current_block_index = chunk.index
-                        if chunk.content_block.type == "text":
+                        if chunk.content_block.type == "thinking":
+                            tool_calls_data[current_block_index] = {
+                                "type": "thinking",
+                                "thinking_text": "",
+                            }
+                            yield f"data: {dumps({'type': 'thinking_start'})}\n\n"
+                        elif chunk.content_block.type == "text":
                             tool_calls_data[current_block_index] = {
                                 "type": "text",
                                 "text": "",
@@ -825,7 +840,14 @@ def chat_stream():
                             # Send immediate tool status for Claude
                             yield f"data: {dumps({'type': 'tool_status', 'toolName': chunk.content_block.name})}\n\n"
                     elif chunk.type == "content_block_delta":
-                        if chunk.delta.type == "text_delta":
+                        if chunk.delta.type == "thinking_delta":
+                            thinking_text = chunk.delta.thinking
+                            if current_block_index in tool_calls_data:
+                                tool_calls_data[current_block_index][
+                                    "thinking_text"
+                                ] += thinking_text
+                            yield f"data: {dumps({'type': 'thinking', 'content': thinking_text})}\n\n"
+                        elif chunk.delta.type == "text_delta":
                             text = chunk.delta.text
                             collected_content += text
                             yield f"data: {dumps({'type': 'text', 'content': text})}\n\n"
@@ -835,6 +857,11 @@ def chat_stream():
                                 tool_calls_data[current_block_index][
                                     "arguments"
                                 ] += partial_json
+                    elif chunk.type == "content_block_stop":
+                        if current_block_index in tool_calls_data:
+                            block = tool_calls_data[current_block_index]
+                            if block.get("type") == "thinking":
+                                yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
                     elif chunk.type == "ping":
                         continue
                 else:
