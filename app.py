@@ -462,7 +462,7 @@ L5 OUTPUT: create_chart, save_file, save_image, create_file, edit_file (present 
 L6 VIEW: toggle_labels, toggle_force_arrows, toggle_charge_visualization, set_style, camera, undo, redo (non-destructive)
 
 RULES:
-1. Atom indices: 0-based in code. User says "atom 5" → index 4.
+1. Atom indices: 0-based.
 2. ALWAYS ask user for MACE model (mace-mp-0a, mace-mp-0b3, mace-mpa-0) before energy/optimization/MD unless already specified.
 3. Tool results include nextSteps hints — follow them for multi-step workflows.
 4. If CachedEnergies=Y, use get_cached_energies instead of recalculating.
