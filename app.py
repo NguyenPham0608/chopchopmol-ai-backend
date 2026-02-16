@@ -588,6 +588,7 @@ def chat_stream():
     state = data.get("state", {})
     tool_results = data.get("toolResults")
     model = data.get("model", "gpt-5-mini")
+    thinking_budget = int(data.get("thinkingBudget", 4096))
 
     print(
         f"📥 Request received: {len(user_message)} chars, state: {len(str(state))} chars",
@@ -757,13 +758,14 @@ def chat_stream():
                 # Repair history specifically for Claude's strict pairing requirement
                 repaired_history = repair_claude_history_for_tool_pairing(history_slice)
                 claude_messages = convert_to_claude_messages(repaired_history)
-                # Extended thinking for supported models
-                supports_thinking = any(
-                    x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"]
+                # Extended thinking for supported models (when budget > 0)
+                supports_thinking = (
+                    thinking_budget > 0
+                    and any(x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"])
                 )
                 call_params = {
                     "model": model,
-                    "max_tokens": 16000 if supports_thinking else 4096,
+                    "max_tokens": max(16000, thinking_budget + 4096) if supports_thinking else 4096,
                     "messages": claude_messages,
                     "system": [
                         {
@@ -778,7 +780,7 @@ def chat_stream():
                 if supports_thinking:
                     call_params["thinking"] = {
                         "type": "enabled",
-                        "budget_tokens": 4096,
+                        "budget_tokens": thinking_budget,
                     }
             else:
                 # Original OpenAI params
