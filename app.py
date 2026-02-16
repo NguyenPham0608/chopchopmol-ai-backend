@@ -888,6 +888,8 @@ def chat_stream():
                             if tc.function:
                                 if tc.function.name:
                                     tool_calls_data[idx]["name"] = tc.function.name
+                                    # Send tool status for OpenAI (same as Claude)
+                                    yield f"data: {dumps({'type': 'tool_status', 'toolName': tc.function.name})}\n\n"
                                 if tc.function.arguments:
                                     tool_calls_data[idx][
                                         "arguments"
@@ -902,7 +904,7 @@ def chat_stream():
             if tool_calls_data:
                 tool_calls = []
                 for tc in tool_calls_data.values():
-                    if "id" in tc:
+                    if tc.get("id") and tc.get("name"):
                         tool_calls.append(
                             {
                                 "id": tc["id"],
