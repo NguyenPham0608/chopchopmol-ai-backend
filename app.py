@@ -377,7 +377,8 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"create_fragment","description":"Group selected atoms into a named fragment.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"isolate_selection","description":"Isolate selected atoms to view/edit separately.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"undo","description":"Undo last action.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}}
+  {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}},
+  {"type":"function","function":{"name":"execute_python","description":"Execute Python code to perform calculations, data analysis, or generate plots. Has access to numpy, matplotlib, math, and the current molecule data (passed as 'atoms' variable — list of dicts with keys: element, x, y, z). Print results to stdout. Matplotlib figures are automatically captured and returned as images.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -759,13 +760,16 @@ def chat_stream():
                 repaired_history = repair_claude_history_for_tool_pairing(history_slice)
                 claude_messages = convert_to_claude_messages(repaired_history)
                 # Extended thinking for supported models (when budget > 0)
-                supports_thinking = (
-                    thinking_budget > 0
-                    and any(x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"])
+                supports_thinking = thinking_budget > 0 and any(
+                    x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"]
                 )
                 call_params = {
                     "model": model,
-                    "max_tokens": max(16000, thinking_budget + 4096) if supports_thinking else 4096,
+                    "max_tokens": (
+                        max(16000, thinking_budget + 4096)
+                        if supports_thinking
+                        else 4096
+                    ),
                     "messages": claude_messages,
                     "system": [
                         {
@@ -859,6 +863,12 @@ def chat_stream():
                                 tool_calls_data[current_block_index][
                                     "arguments"
                                 ] += partial_json
+                                # Stream argument deltas for live tool preview
+                                tc_name = tool_calls_data[current_block_index].get(
+                                    "name"
+                                )
+                                if tc_name:
+                                    yield f"data: {dumps({'type': 'tool_delta', 'toolName': tc_name, 'delta': partial_json})}\n\n"
                     elif chunk.type == "content_block_stop":
                         if current_block_index in tool_calls_data:
                             block = tool_calls_data[current_block_index]
@@ -1475,6 +1485,99 @@ def knowledge_search():
     except Exception as e:
         print(f"❌ Search error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/ai/python/execute", methods=["POST"])
+def execute_python_code():
+    """Execute Python code with numpy/matplotlib/math available."""
+    data = request.json
+    code = data.get("code", "")
+    atoms_data = data.get("atoms", [])
+
+    if not code.strip():
+        return jsonify({"success": False, "message": "No code provided"}), 400
+
+    import io, base64, contextlib
+
+    # Prepare execution namespace with useful libraries
+    exec_globals = {"__builtins__": __builtins__}
+    try:
+        import numpy as np
+
+        exec_globals["np"] = np
+        exec_globals["numpy"] = np
+    except ImportError:
+        pass
+
+    plt = None
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        exec_globals["plt"] = plt
+        exec_globals["matplotlib"] = matplotlib
+    except ImportError:
+        pass
+
+    import math
+
+    exec_globals["math"] = math
+
+    # Inject molecule data if provided
+    if atoms_data:
+        exec_globals["atoms"] = atoms_data
+
+    # Capture stdout/stderr
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+
+    try:
+        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(
+            stderr_buf
+        ):
+            exec(code, exec_globals)
+    except Exception as e:
+        stderr_buf.write(f"\n{type(e).__name__}: {e}")
+
+    # Capture matplotlib figures
+    figures = []
+    if plt is not None:
+        for fig_num in plt.get_fignums():
+            fig = plt.figure(fig_num)
+            buf = io.BytesIO()
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="#1a1a2e",
+                edgecolor="none",
+            )
+            buf.seek(0)
+            figures.append(base64.b64encode(buf.read()).decode("ascii"))
+            buf.close()
+        plt.close("all")
+
+    stdout_str = stdout_buf.getvalue()
+    stderr_str = stderr_buf.getvalue()
+
+    # Truncate very long output
+    if len(stdout_str) > 10000:
+        stdout_str = stdout_str[:10000] + "\n... (truncated)"
+    if len(stderr_str) > 5000:
+        stderr_str = stderr_str[:5000] + "\n... (truncated)"
+
+    return jsonify(
+        {
+            "success": len(stderr_str.strip()) == 0,
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "figures": figures,
+            "message": stdout_str if not stderr_str.strip() else f"Error: {stderr_str}",
+        }
+    )
 
 
 @app.route("/ai/transcribe", methods=["POST"])
