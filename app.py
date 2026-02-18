@@ -461,11 +461,33 @@ RULES:
 """
 
 
-def build_system_prompt(state):
+def build_system_prompt(state, model=""):
     if not USE_LAYER_PROMPT:
         return build_system_prompt_legacy(state)
 
-    return f"""ChopChopMol AI — molecular visualization and computation assistant.
+    # Human-readable model name for self-awareness
+    model_display = model
+    model_lower = model.lower()
+    if "claude" in model_lower:
+        if "opus" in model_lower:
+            model_display = "Claude Opus 4"
+        elif "sonnet-4-5" in model_lower:
+            model_display = "Claude Sonnet 4.5"
+        elif "sonnet-4" in model_lower:
+            model_display = "Claude Sonnet 4"
+        elif "haiku" in model_lower:
+            model_display = "Claude Haiku 4.5"
+    elif "gpt-5" in model_lower:
+        if "mini" in model_lower:
+            model_display = "GPT-5 Mini"
+        elif "pro" in model_lower:
+            model_display = "GPT-5.2 Pro"
+        else:
+            model_display = model.upper().replace("-", " ").replace(".", " ").strip()
+    elif "o3" in model_lower or "o4" in model_lower:
+        model_display = model
+
+    return f"""ChopChopMol AI — molecular visualization and computation assistant. Powered by {model_display}.
 
 STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, CachedEnergies={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}
 
@@ -691,13 +713,13 @@ def chat_stream():
                 conversationHistory.insert(first_tool_idx, reconstructed_assistant)
     t_prompt = time.time()
 
-    # Use cached prompt if available
-    state_hash = hash_state(state)
+    # Use cached prompt if available (keyed by state + model)
+    state_hash = hash_state(state) + ":" + model
     if state_hash in prompt_cache:
         systemPrompt = prompt_cache[state_hash]
         print(f"⚡ Using cached prompt (hash: {state_hash[:8]})", flush=True)
     else:
-        systemPrompt = build_system_prompt(state)
+        systemPrompt = build_system_prompt(state, model)
         prompt_cache[state_hash] = systemPrompt
         # Limit cache size
         if len(prompt_cache) > MAX_PROMPT_CACHE:
