@@ -465,25 +465,32 @@ def build_system_prompt(state, model=""):
     if not USE_LAYER_PROMPT:
         return build_system_prompt_legacy(state)
 
-    # Human-readable model name for self-awareness
+    # Human-readable model name from model ID
+    # e.g. "claude-sonnet-4-5-20250929" -> "Claude Sonnet 4.5"
+    #      "claude-haiku-4-5-20251001"  -> "Claude Haiku 4.5"
+    #      "claude-opus-4-6"            -> "Claude Opus 4.6"
+    #      "gpt-5-mini"                 -> "GPT-5 Mini"
+    import re
+
     model_display = model
     model_lower = model.lower()
-    if "claude" in model_lower:
-        if "opus" in model_lower:
-            model_display = "Claude Opus 4"
-        elif "sonnet-4-5" in model_lower:
-            model_display = "Claude Sonnet 4.5"
-        elif "sonnet-4" in model_lower:
-            model_display = "Claude Sonnet 4"
-        elif "haiku" in model_lower:
-            model_display = "Claude Haiku 4.5"
+    claude_match = re.match(r"claude-(opus|sonnet|haiku)-(\d+(?:-\d+)?)", model_lower)
+    claude_legacy = re.match(r"claude-(\d+(?:-\d+)?)-(opus|sonnet|haiku)", model_lower)
+    if claude_match:
+        family = claude_match.group(1).capitalize()
+        version = claude_match.group(2).replace("-", ".")
+        model_display = f"Claude {family} {version}"
+    elif claude_legacy:
+        family = claude_legacy.group(2).capitalize()
+        version = claude_legacy.group(1).replace("-", ".")
+        model_display = f"Claude {family} {version}"
     elif "gpt-5" in model_lower:
         if "mini" in model_lower:
             model_display = "GPT-5 Mini"
         elif "pro" in model_lower:
-            model_display = "GPT-5.2 Pro"
+            model_display = "GPT-5 Pro"
         else:
-            model_display = model.upper().replace("-", " ").replace(".", " ").strip()
+            model_display = model
     elif "o3" in model_lower or "o4" in model_lower:
         model_display = model
 
