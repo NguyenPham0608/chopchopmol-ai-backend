@@ -15,6 +15,22 @@ from time import time
 import torch
 import httpx
 
+
+# Detect best available device: CUDA > MPS (Apple Silicon) > CPU
+def get_torch_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+TORCH_DEVICE = get_torch_device()
+# MACE models contain float64 weights which MPS can't load directly,
+# so MACE must run on CPU. MPS is still used for orbital tensor math (float32).
+MACE_DEVICE = "cpu" if TORCH_DEVICE == "mps" else TORCH_DEVICE
+MACE_DTYPE = "float64" if MACE_DEVICE != "mps" else "float32"
+
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
 
@@ -49,9 +65,8 @@ def get_mace_calculator(model_id="mace-mp-0a"):
         from mace.calculators import mace_mp
 
         model_url = MACE_MODELS.get(model_id, MACE_MODELS["mace-mp-0a"])["url"]
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         _mace_calculators[model_id] = mace_mp(
-            model=model_url, default_dtype="float32", device=device
+            model=model_url, default_dtype="float32", device=MACE_DEVICE
         )
     return _mace_calculators[model_id]
 
@@ -147,13 +162,13 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
     lumo_index = n_occ if n_occ < n_mo else -1
 
     # Pre-compute torch tensors for GPU-accelerated batch MO computation
+    _effective_device = TORCH_DEVICE
     try:
-        _torch_device = "cuda" if torch.cuda.is_available() else "cpu"
-        ao_tensor = torch.from_numpy(ao_values.astype(np.float32)).to(_torch_device)
-        coeff_tensor = torch.from_numpy(mo_coeff.astype(np.float32)).to(_torch_device)
+        ao_tensor = torch.from_numpy(ao_values.astype(np.float32)).to(TORCH_DEVICE)
+        coeff_tensor = torch.from_numpy(mo_coeff.astype(np.float32)).to(TORCH_DEVICE)
     except Exception as e:
         print(f"⚠️ Torch tensor creation failed ({e}), falling back to numpy")
-        _torch_device = "numpy"
+        _effective_device = "numpy"
         ao_tensor = None
         coeff_tensor = None
 
@@ -165,7 +180,7 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         "ao_values": ao_values,
         "ao_tensor": ao_tensor,
         "coeff_tensor": coeff_tensor,
-        "torch_device": _torch_device,
+        "torch_device": _effective_device,
         "grid_shape": X.shape,
         "grid_meta": {
             "origin": [x[0] * BOHR_TO_ANG, y[0] * BOHR_TO_ANG, z[0] * BOHR_TO_ANG],
@@ -1044,8 +1059,7 @@ def optimize_geometry():
         }
 
         mace_model = model_map.get(model_name, "medium")
-        _opt_device = "cuda" if torch.cuda.is_available() else "cpu"
-        calc = mace_mp(model=mace_model, device=_opt_device, default_dtype="float64")
+        calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
         atoms.calc = calc
 
         # Store trajectory frames
@@ -1212,8 +1226,7 @@ def run_molecular_dynamics():
         }
         mace_model = model_map.get(model_name, "medium")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        calc = mace_mp(model=mace_model, device=device, default_dtype="float64")
+        calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
         atoms.calc = calc
 
         # Initialize velocities from Maxwell-Boltzmann distribution
@@ -2362,7 +2375,9 @@ def remote_status():
             return jsonify({"connected": False})
 
 
-print(f"Torch device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+print(
+    f"Torch device: {TORCH_DEVICE} | MACE device: {MACE_DEVICE} | Orbital tensors: {TORCH_DEVICE}"
+)
 # ============================================================================
 
 if __name__ == "__main__":
