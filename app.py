@@ -496,10 +496,10 @@ def build_system_prompt(state, model=""):
 
     return f"""ChopChopMol AI — molecular visualization and computation assistant. Powered by {model_display}.
 
-STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, CachedEnergies={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}
+STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, CachedEnergies={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}, File={state.get('currentFileName') or 'None'}, Folder={str(len(state.get('folderFiles', [])))+' files' if state.get('hasFolder') else 'None'}
 
 TOOL LAYERS (compose bottom-up):
-L1 QUERY: get_molecule_info, get_atom_info, get_bonded_atoms, measure_distance, measure_angle, measure_dihedral, get_cached_energies, web_search (read-only, no side effects)
+L1 QUERY: get_molecule_info, get_atom_info, get_bonded_atoms, measure_distance, measure_angle, measure_dihedral, get_cached_energies, web_search, read_file, list_folder_files (read-only, no side effects)
 L2 SELECT: select_atoms, select_atoms_by_element, select_all_atoms, select_connected, clear_selection (set context for L3)
 L3 EDIT: add_atom, remove_atoms, change_atom_element, set_bond_distance, set_angle, set_dihedral_angle, transform_atoms, split_molecule (modify molecule, most require selection)
 L4 GENERATE: rotational_scan, translation_scan, angle_scan, calculate_energy, calculate_all_energies, optimize_geometry, run_md, load_molecule (create frames/data)
