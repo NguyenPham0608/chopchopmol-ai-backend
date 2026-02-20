@@ -2,14 +2,14 @@ Flask
 Flask-CORS
 openai
 anthropic
-httpx==0.28.1
-gunicorn==23.0.0
-orjson==3.11.5
-torch==2.9.1
-mace-torch==0.3.14
-ase==3.27.0
-matplotlib==3.10.8
-paramiko==3.5.0
-pyscf==2.8.0
-scikit-image==0.25.2
+httpx
+ gunicorn
+orjson
+torch
+mace-torch
+ase
+matplotlib
+paramiko
+pyscf
+scikit-image
 cuequivariance
