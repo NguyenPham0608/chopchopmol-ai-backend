@@ -1165,16 +1165,12 @@ def calculate_energy_batch():
         # Create atoms object once from first frame
         first_frame = frames_data[0]
         symbols = [a["element"] for a in first_frame]
-        positions = np.array(
-            [[a["x"], a["y"], a["z"]] for a in first_frame], dtype=np.float32
-        )
+        positions = [[a["x"], a["y"], a["z"]] for a in first_frame]
         atoms = Atoms(symbols=symbols, positions=positions)
         atoms.calc = calc
 
         for i, atoms_data in enumerate(frames_data):
-            positions = np.array(
-                [[a["x"], a["y"], a["z"]] for a in atoms_data], dtype=np.float32
-            )
+            positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
             atoms.set_positions(positions)
 
             energy = float(atoms.get_potential_energy())
