@@ -3,7 +3,7 @@ Flask-CORS
 openai
 anthropic
 httpx
- gunicorn
+gunicorn
 orjson
 torch
 mace-torch

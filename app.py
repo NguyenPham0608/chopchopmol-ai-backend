@@ -393,7 +393,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"isolate_selection","description":"Isolate selected atoms to view/edit separately.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"undo","description":"Undo last action.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"execute_python","description":"Execute Python code to perform calculations, data analysis, or generate plots. Has access to numpy, matplotlib, math, and the current molecule data (passed as 'atoms' variable — list of dicts with keys: element, x, y, z). Print results to stdout. Matplotlib figures are automatically captured and returned as images.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
+  {"type":"function","function":{"name":"execute_python","description":"Execute Python code for calculations, data analysis, or plots. Available variables: 'atoms' (list of {element, x, y, z} for current frame), 'positions' (numpy array shape (n_frames, n_atoms, 3) — only if trajectory loaded, otherwise not defined), 'energies' (numpy 1D array of per-frame energies — only if available), 'frames' (list of {index, atoms} dicts — only if trajectory loaded). Libraries: numpy (np), matplotlib (plt), math. Check variable existence with e.g. 'positions' in dir() before using trajectory variables. Print results to stdout. Matplotlib figures are auto-captured as images.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -781,10 +781,39 @@ def chat_stream():
     else:
         print(f"📜 History clean (no tools): {len(history_slice)} messages", flush=True)
 
+    # Token-aware history pruning: drop oldest message groups if too large
+    MAX_HISTORY_TOKENS = 120000
+
+    def _estimate_msg_tokens(msg):
+        tokens = len(str(msg.get("content") or "")) // 4
+        for tc in msg.get("tool_calls", []):
+            tokens += len(tc.get("function", {}).get("arguments", "")) // 4
+        return tokens
+
+    system_tokens = _estimate_msg_tokens({"content": systemPrompt})
+    while len(history_slice) > 2:
+        total = system_tokens + sum(_estimate_msg_tokens(m) for m in history_slice)
+        if total <= MAX_HISTORY_TOKENS:
+            break
+        # Drop oldest message and its paired responses
+        removed = history_slice.pop(0)
+        if removed.get("role") == "user" and history_slice and history_slice[0].get("role") == "assistant":
+            history_slice.pop(0)
+            # Also remove any following tool results paired with this assistant
+            while history_slice and history_slice[0].get("role") == "tool":
+                history_slice.pop(0)
+        elif removed.get("role") == "assistant":
+            # Remove paired tool results
+            while history_slice and history_slice[0].get("role") == "tool":
+                history_slice.pop(0)
+        # Clean up any leading orphaned tool messages
+        while history_slice and history_slice[0].get("role") == "tool":
+            history_slice.pop(0)
+
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
 
-    # Safe token estimation (fix for None content)
-    total_tokens_est = sum(len(str(m.get("content") or "")) // 4 for m in messages)
+    # Safe token estimation (includes tool_call arguments)
+    total_tokens_est = sum(_estimate_msg_tokens(m) for m in messages)
     print(
         f"📊 Messages: {len(messages)}, estimated tokens: {total_tokens_est}",
         flush=True,
@@ -974,7 +1003,21 @@ def chat_stream():
                     "content": collected_content,
                     "tool_calls": tool_calls,  # Adapted to OpenAI-style for history
                 }
-                conversationHistory.append(assistant_msg)
+                # Store truncated version in history (large execute_python code bloats tokens)
+                import copy
+                stored_msg = copy.deepcopy(assistant_msg)
+                for tc in stored_msg.get("tool_calls", []):
+                    args_str = tc.get("function", {}).get("arguments", "")
+                    if tc.get("function", {}).get("name") == "execute_python" and len(args_str) > 500:
+                        try:
+                            args_obj = json.loads(args_str)
+                            desc = args_obj.get("description", "Python code")
+                            args_obj["code"] = f"[truncated — {len(args_str)} chars] {desc}"
+                            tc["function"]["arguments"] = json.dumps(args_obj)
+                        except Exception:
+                            tc["function"]["arguments"] = '{"code":"[truncated]"}'
+                conversationHistory.append(stored_msg)
+                # Send full (untruncated) assistant_msg to frontend for execution
                 yield f"data: {dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
             else:
                 if collected_content:
@@ -1577,6 +1620,26 @@ def execute_python_code():
     # Inject molecule data if provided
     if atoms_data:
         exec_globals["atoms"] = atoms_data
+
+    # Inject trajectory data if provided (frames, positions numpy array, energies)
+    frames_data = data.get("frames")
+    if frames_data:
+        exec_globals["frames"] = frames_data
+        try:
+            positions_list = []
+            for frame in frames_data:
+                positions_list.append(
+                    [[a["x"], a["y"], a["z"]] for a in frame["atoms"]]
+                )
+            exec_globals["positions"] = np.array(positions_list)
+        except Exception:
+            pass  # positions won't be available if frames are malformed
+
+    energies_data = data.get("energies")
+    if energies_data:
+        exec_globals["energies"] = np.array(
+            [e if e is not None else float("nan") for e in energies_data]
+        )
 
     # Capture stdout/stderr
     stdout_buf = io.StringIO()
