@@ -3,6 +3,7 @@ from flask_cors import CORS
 from openai import OpenAI
 from anthropic import Anthropic
 import os
+import json
 import orjson
 import tempfile
 import numpy as np
@@ -484,15 +485,26 @@ def build_system_prompt(state, model=""):
         family = claude_legacy.group(2).capitalize()
         version = claude_legacy.group(1).replace("-", ".")
         model_display = f"Claude {family} {version}"
+    elif "gpt-5.2" in model_lower:
+        model_display = "GPT-5.2" + (" Pro" if "pro" in model_lower else "")
+    elif "gpt-5.1" in model_lower:
+        model_display = "GPT-5.1" + (" Codex Max" if "codex" in model_lower else "")
     elif "gpt-5" in model_lower:
         if "mini" in model_lower:
             model_display = "GPT-5 Mini"
-        elif "pro" in model_lower:
-            model_display = "GPT-5 Pro"
+        elif "nano" in model_lower:
+            model_display = "GPT-5 Nano"
         else:
-            model_display = model
-    elif "o3" in model_lower or "o4" in model_lower:
-        model_display = model
+            model_display = "GPT-5"
+    elif "gpt-4.1" in model_lower:
+        if "mini" in model_lower:
+            model_display = "GPT-4.1 Mini"
+        elif "nano" in model_lower:
+            model_display = "GPT-4.1 Nano"
+        else:
+            model_display = "GPT-4.1"
+    elif model_lower.startswith("o4") or model_lower.startswith("o3"):
+        model_display = model.upper()
 
     return f"""ChopChopMol AI — molecular visualization and computation assistant. Powered by {model_display}.
 
@@ -539,6 +551,10 @@ def convert_to_claude_messages(history):
 
         elif role == "assistant":
             content = []
+            # Reconstruct thinking blocks (must appear before text/tool_use)
+            if msg.get("_thinking_blocks"):
+                for tb in msg["_thinking_blocks"]:
+                    content.append(tb)
             if msg.get("content"):
                 content.append({"type": "text", "text": msg["content"]})
             if msg.get("tool_calls"):
@@ -833,16 +849,13 @@ def chat_stream():
                 repaired_history = repair_claude_history_for_tool_pairing(history_slice)
                 claude_messages = convert_to_claude_messages(repaired_history)
                 # Extended thinking for supported models (when budget > 0)
+                is_opus_46 = "opus-4-6" in model
+                is_sonnet_46 = "sonnet-4-6" in model
                 supports_thinking = thinking_budget > 0 and any(
                     x in model for x in ["sonnet-4", "opus-4", "haiku-4-5"]
                 )
                 call_params = {
                     "model": model,
-                    "max_tokens": (
-                        max(16000, thinking_budget + 4096)
-                        if supports_thinking
-                        else 4096
-                    ),
                     "messages": claude_messages,
                     "system": [
                         {
@@ -854,13 +867,37 @@ def chat_stream():
                     "tools": CLAUDE_TOOLS if TOOLS else None,
                     "stream": True,
                 }
-                if supports_thinking:
+                if is_opus_46:
+                    # Opus 4.6: adaptive thinking (manual budget_tokens deprecated)
+                    call_params["thinking"] = {"type": "adaptive"}
+                    call_params["temperature"] = 1  # Required with thinking
+                    call_params["max_tokens"] = 16384
+                elif supports_thinking:
+                    # Sonnet/Opus/Haiku: manual thinking with budget_tokens
                     call_params["thinking"] = {
                         "type": "enabled",
                         "budget_tokens": thinking_budget,
                     }
+                    call_params["temperature"] = 1  # Required with thinking
+                    call_params["max_tokens"] = max(16000, thinking_budget + 4096)
+                else:
+                    call_params["max_tokens"] = 4096
             else:
-                # Original OpenAI params
+                # OpenAI params — detect model capabilities
+                is_o_series = any(model.startswith(p) for p in ["o3", "o4"])
+                is_gpt5 = model.startswith("gpt-5")
+                is_reasoning_model = is_o_series or is_gpt5
+
+                # Map thinking budget → reasoning_effort
+                if thinking_budget <= 0:
+                    reas_effort = "none" if is_gpt5 else "low"
+                elif thinking_budget <= 4096:
+                    reas_effort = "low"
+                elif thinking_budget <= 10000:
+                    reas_effort = "medium"
+                else:
+                    reas_effort = "high"
+
                 call_params = {
                     "model": model,
                     "messages": messages,
@@ -868,25 +905,35 @@ def chat_stream():
                     "tool_choice": "auto",
                     "stream": True,
                 }
-                if model.startswith("gpt-5"):
+                if is_reasoning_model:
                     call_params["max_completion_tokens"] = 16384
-                    call_params["reasoning_effort"] = "low"
-                    call_params["verbosity"] = "low"
+                    call_params["reasoning_effort"] = reas_effort
+                    if is_gpt5:
+                        call_params["verbosity"] = "low"
                 else:
                     call_params["max_tokens"] = 16384
 
             # Create stream
             if is_claude:
-                stream = claude_client.messages.create(**call_params)
+                if is_sonnet_46 and supports_thinking:
+                    # Sonnet 4.6: interleaved thinking via beta endpoint
+                    stream = claude_client.beta.messages.create(
+                        betas=["interleaved-thinking-2025-05-14"],
+                        **call_params,
+                    )
+                else:
+                    stream = claude_client.messages.create(**call_params)
             else:
                 stream = client.chat.completions.create(**call_params)
 
             print(f"📡 Stream created: {(time.time() - t0) * 1000:.0f}ms", flush=True)
 
             collected_content = ""
+            collected_thinking_blocks = []  # Preserve thinking for history
             tool_calls_data = {}
             first_chunk = True
             current_block_index = None
+            openai_reasoning_started = False
 
             for chunk in stream:
                 if first_chunk:
@@ -903,8 +950,15 @@ def chat_stream():
                             tool_calls_data[current_block_index] = {
                                 "type": "thinking",
                                 "thinking_text": "",
+                                "signature": "",
                             }
                             yield f"data: {dumps({'type': 'thinking_start'})}\n\n"
+                        elif chunk.content_block.type == "redacted_thinking":
+                            # Safety-redacted thinking — preserve opaque data as-is
+                            tool_calls_data[current_block_index] = {
+                                "type": "redacted_thinking",
+                                "data": getattr(chunk.content_block, "data", ""),
+                            }
                         elif chunk.content_block.type == "text":
                             tool_calls_data[current_block_index] = {
                                 "type": "text",
@@ -926,6 +980,11 @@ def chat_stream():
                                     "thinking_text"
                                 ] += thinking_text
                             yield f"data: {dumps({'type': 'thinking', 'content': thinking_text})}\n\n"
+                        elif chunk.delta.type == "signature_delta":
+                            if current_block_index in tool_calls_data:
+                                tool_calls_data[current_block_index][
+                                    "signature"
+                                ] = tool_calls_data[current_block_index].get("signature", "") + chunk.delta.signature
                         elif chunk.delta.type == "text_delta":
                             text = chunk.delta.text
                             collected_content += text
@@ -947,17 +1006,41 @@ def chat_stream():
                             block = tool_calls_data[current_block_index]
                             if block.get("type") == "thinking":
                                 yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
+                                # Preserve thinking block for history
+                                collected_thinking_blocks.append({
+                                    "type": "thinking",
+                                    "thinking": block["thinking_text"],
+                                    "signature": block.get("signature", ""),
+                                })
+                            elif block.get("type") == "redacted_thinking":
+                                collected_thinking_blocks.append({
+                                    "type": "redacted_thinking",
+                                    "data": block.get("data", ""),
+                                })
                     elif chunk.type == "ping":
                         continue
                 else:
-                    # Original OpenAI chunk processing
+                    # OpenAI chunk processing (GPT-5, o-series, GPT-4.1)
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if not delta:
                         continue
+                    # Stream reasoning content from o-series / GPT-5
+                    reasoning_text = getattr(delta, "reasoning_content", None)
+                    if reasoning_text:
+                        if not openai_reasoning_started:
+                            openai_reasoning_started = True
+                            yield f"data: {dumps({'type': 'thinking_start'})}\n\n"
+                        yield f"data: {dumps({'type': 'thinking', 'content': reasoning_text})}\n\n"
                     if delta.content:
+                        if openai_reasoning_started:
+                            openai_reasoning_started = False
+                            yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
                         collected_content += delta.content
                         yield f"data: {dumps({'type': 'text', 'content': delta.content})}\n\n"
                     if delta.tool_calls:
+                        if openai_reasoning_started:
+                            openai_reasoning_started = False
+                            yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
                         for tc in delta.tool_calls:
                             idx = tc.index
                             if idx not in tool_calls_data:
@@ -977,6 +1060,10 @@ def chat_stream():
                                     tool_calls_data[idx][
                                         "arguments"
                                     ] += tc.function.arguments
+
+            # Close any unclosed OpenAI reasoning block
+            if not is_claude and openai_reasoning_started:
+                yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
 
             print(
                 f"✅ Stream complete: {len(collected_content)} chars, total: {(time.time() - t0) * 1000:.0f}ms",
@@ -1003,6 +1090,9 @@ def chat_stream():
                     "content": collected_content,
                     "tool_calls": tool_calls,  # Adapted to OpenAI-style for history
                 }
+                # Preserve thinking blocks for Claude history reconstruction
+                if collected_thinking_blocks:
+                    assistant_msg["_thinking_blocks"] = collected_thinking_blocks
                 # Store truncated version in history (large execute_python code bloats tokens)
                 import copy
                 stored_msg = copy.deepcopy(assistant_msg)
@@ -1021,9 +1111,10 @@ def chat_stream():
                 yield f"data: {dumps({'type': 'tool_calls', 'toolCalls': tool_calls, 'assistantMessage': assistant_msg, 'sessionId': session_id})}\n\n"
             else:
                 if collected_content:
-                    conversationHistory.append(
-                        {"role": "assistant", "content": collected_content}
-                    )
+                    msg = {"role": "assistant", "content": collected_content}
+                    if collected_thinking_blocks:
+                        msg["_thinking_blocks"] = collected_thinking_blocks
+                    conversationHistory.append(msg)
                 yield f"data: {dumps({'type': 'done', 'sessionId': session_id})}\n\n"
 
         except Exception as e:
