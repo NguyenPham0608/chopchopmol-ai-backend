@@ -394,7 +394,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"isolate_selection","description":"Isolate selected atoms to view/edit separately.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"undo","description":"Undo last action.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"execute_python","description":"Execute Python code for calculations, data analysis, or plots. Available variables: 'atoms' (list of {element, x, y, z} for current frame), 'positions' (numpy array shape (n_frames, n_atoms, 3) — only if trajectory loaded, otherwise not defined), 'energies' (numpy 1D array of per-frame energies — only if available), 'frames' (list of {index, atoms} dicts — only if trajectory loaded). Libraries: numpy (np), matplotlib (plt), math. Check variable existence with e.g. 'positions' in dir() before using trajectory variables. Print results to stdout. Matplotlib figures are auto-captured as images.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
+  {"type":"function","function":{"name":"execute_python","description":"Execute Python code. Pre-injected variables (use 'x' in dir() to check availability): atoms = list of dicts [{element, x, y, z}, ...] (current frame, Angstrom). positions = numpy float64 array shape (n_frames, n_atoms, 3) in Angstrom — use for vectorized analysis instead of looping over frames. energies = numpy float64 1D array of potential energies in eV, one per frame — plain number array, NOT dicts. frames = list of dicts [{index, atoms: [{element, x, y, z, fx?, fy?, fz?}]}] — only needed for element labels per frame. steps = numpy int array of MD step numbers (only after MD). temperatures = numpy float64 array of temps in K per frame (only after MD). kinetic_energies = numpy float64 array of kinetic energies eV per frame (only after MD). total_energies = numpy float64 array of total energies (pot+kin) eV per frame (only after MD). Libraries: numpy (np), matplotlib (plt), math. Figures auto-captured. Print results to stdout.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -518,12 +518,23 @@ L4 GENERATE: rotational_scan, translation_scan, angle_scan, calculate_energy, ca
 L5 OUTPUT: create_chart, save_file, save_image, create_file, edit_file (present results)
 L6 VIEW: toggle_labels, toggle_force_arrows, toggle_charge_visualization, set_style, camera, undo, redo (non-destructive)
 
+EXECUTE_PYTHON — auto-injected variables (no need to call other tools first):
+- atoms: list of {{element, x, y, z}} (current frame, Angstrom)
+- positions: numpy (n_frames, n_atoms, 3) — all trajectory coordinates. Use this for vectorized analysis.
+- energies: numpy 1D float array of potential energies (eV), one per frame. Plain numbers, NOT dicts.
+- frames: list of {{index, atoms:[{{element,x,y,z,fx?,fy?,fz?}}]}} — only needed for element labels.
+- steps, temperatures, kinetic_energies, total_energies: numpy arrays (only after MD).
+- Libraries: numpy (np), matplotlib (plt), math, scipy (import yourself: from scipy.spatial.distance import pdist, cdist, etc.)
+- Write EFFICIENT code: use np.linalg.norm with broadcasting, scipy.spatial.distance.pdist/cdist for pairwise distances — NEVER use Python triple-nested loops over frames×atoms×atoms.
+- Do NOT call get_molecule_info or get_cached_energies before execute_python — the data is already injected.
+- Write the code correctly the first time. Check the variable docs above — energies is a numpy array, not a list of dicts.
+
 RULES:
 1. Atom indices: 0-based.
 2. ALWAYS ask user for MACE model (mace-mp-0a, mace-mp-0b3, mace-mpa-0) before energy/optimization/MD unless already specified.
 3. Tool results include nextSteps hints — follow them for multi-step workflows.
 4. If CachedEnergies=Y, use get_cached_energies instead of recalculating.
-5. Brief responses (1-2 sentences). Execute tools immediately.
+5. Brief responses (1-2 sentences). Execute tools immediately. Minimize tool calls — do as much as possible in a single execute_python call.
 6. Measurement tools accept atom indices directly — no need to select first.
 7. For unknown chemistry facts, use web_search. For known facts, answer directly.
 """
@@ -1725,6 +1736,13 @@ def execute_python_code():
 
     exec_globals["math"] = math
 
+    try:
+        import scipy
+
+        exec_globals["scipy"] = scipy
+    except ImportError:
+        pass
+
     # Inject molecule data if provided
     if atoms_data:
         exec_globals["atoms"] = atoms_data
@@ -1747,6 +1765,24 @@ def execute_python_code():
     if energies_data:
         exec_globals["energies"] = np.array(
             [e if e is not None else float("nan") for e in energies_data]
+        )
+
+    # Inject MD metadata arrays if available (from cached MACE results)
+    steps_data = data.get("steps")
+    if steps_data:
+        exec_globals["steps"] = np.array(steps_data)
+    temps_data = data.get("temperatures")
+    if temps_data:
+        exec_globals["temperatures"] = np.array(temps_data)
+    kin_data = data.get("kinetic_energies")
+    if kin_data:
+        exec_globals["kinetic_energies"] = np.array(
+            [e if e is not None else float("nan") for e in kin_data]
+        )
+    total_data = data.get("total_energies")
+    if total_data:
+        exec_globals["total_energies"] = np.array(
+            [e if e is not None else float("nan") for e in total_data]
         )
 
     # Capture stdout/stderr
