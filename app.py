@@ -813,7 +813,11 @@ def chat_stream():
             break
         # Drop oldest message and its paired responses
         removed = history_slice.pop(0)
-        if removed.get("role") == "user" and history_slice and history_slice[0].get("role") == "assistant":
+        if (
+            removed.get("role") == "user"
+            and history_slice
+            and history_slice[0].get("role") == "assistant"
+        ):
             history_slice.pop(0)
             # Also remove any following tool results paired with this assistant
             while history_slice and history_slice[0].get("role") == "tool":
@@ -982,9 +986,12 @@ def chat_stream():
                             yield f"data: {dumps({'type': 'thinking', 'content': thinking_text})}\n\n"
                         elif chunk.delta.type == "signature_delta":
                             if current_block_index in tool_calls_data:
-                                tool_calls_data[current_block_index][
-                                    "signature"
-                                ] = tool_calls_data[current_block_index].get("signature", "") + chunk.delta.signature
+                                tool_calls_data[current_block_index]["signature"] = (
+                                    tool_calls_data[current_block_index].get(
+                                        "signature", ""
+                                    )
+                                    + chunk.delta.signature
+                                )
                         elif chunk.delta.type == "text_delta":
                             text = chunk.delta.text
                             collected_content += text
@@ -1007,16 +1014,20 @@ def chat_stream():
                             if block.get("type") == "thinking":
                                 yield f"data: {dumps({'type': 'thinking_done'})}\n\n"
                                 # Preserve thinking block for history
-                                collected_thinking_blocks.append({
-                                    "type": "thinking",
-                                    "thinking": block["thinking_text"],
-                                    "signature": block.get("signature", ""),
-                                })
+                                collected_thinking_blocks.append(
+                                    {
+                                        "type": "thinking",
+                                        "thinking": block["thinking_text"],
+                                        "signature": block.get("signature", ""),
+                                    }
+                                )
                             elif block.get("type") == "redacted_thinking":
-                                collected_thinking_blocks.append({
-                                    "type": "redacted_thinking",
-                                    "data": block.get("data", ""),
-                                })
+                                collected_thinking_blocks.append(
+                                    {
+                                        "type": "redacted_thinking",
+                                        "data": block.get("data", ""),
+                                    }
+                                )
                     elif chunk.type == "ping":
                         continue
                 else:
@@ -1095,14 +1106,20 @@ def chat_stream():
                     assistant_msg["_thinking_blocks"] = collected_thinking_blocks
                 # Store truncated version in history (large execute_python code bloats tokens)
                 import copy
+
                 stored_msg = copy.deepcopy(assistant_msg)
                 for tc in stored_msg.get("tool_calls", []):
                     args_str = tc.get("function", {}).get("arguments", "")
-                    if tc.get("function", {}).get("name") == "execute_python" and len(args_str) > 500:
+                    if (
+                        tc.get("function", {}).get("name") == "execute_python"
+                        and len(args_str) > 500
+                    ):
                         try:
                             args_obj = json.loads(args_str)
                             desc = args_obj.get("description", "Python code")
-                            args_obj["code"] = f"[truncated — {len(args_str)} chars] {desc}"
+                            args_obj["code"] = (
+                                f"[truncated — {len(args_str)} chars] {desc}"
+                            )
                             tc["function"]["arguments"] = json.dumps(args_obj)
                         except Exception:
                             tc["function"]["arguments"] = '{"code":"[truncated]"}'
