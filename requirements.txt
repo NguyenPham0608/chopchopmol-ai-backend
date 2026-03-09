@@ -13,3 +13,4 @@ paramiko
 pyscf
 scikit-image
 cuequivariance
+gpu4pyscf-cuda12x
