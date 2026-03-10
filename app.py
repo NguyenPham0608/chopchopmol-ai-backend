@@ -1324,16 +1324,24 @@ def calculate_energy_batch():
         calc = get_mace_calculator(model_id)
         results = []
 
-        # Create atoms object once from first frame
+        # Create atoms object from first frame
         first_frame = frames_data[0]
-        symbols = [a["element"] for a in first_frame]
+        prev_symbols = [a["element"] for a in first_frame]
         positions = [[a["x"], a["y"], a["z"]] for a in first_frame]
-        atoms = Atoms(symbols=symbols, positions=positions)
+        atoms = Atoms(symbols=prev_symbols, positions=positions)
         atoms.calc = calc
 
         for i, atoms_data in enumerate(frames_data):
+            symbols = [a["element"] for a in atoms_data]
             positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
-            atoms.set_positions(positions)
+
+            # Rebuild Atoms object if atom count or elements changed
+            if symbols != prev_symbols:
+                atoms = Atoms(symbols=symbols, positions=positions)
+                atoms.calc = calc
+                prev_symbols = symbols
+            else:
+                atoms.set_positions(positions)
 
             energy = float(atoms.get_potential_energy())
             forces = atoms.get_forces()
