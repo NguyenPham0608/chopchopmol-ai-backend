@@ -79,7 +79,7 @@ def dumps(obj):
 app = Flask(__name__)
 CORS(
     app,
-    resources={r"/ai/*": {"origins": "*"}, r"/api/*": {"origins": "*"}},
+    resources={r"/ai/*": {"origins": "*"}, r"/api/*": {"origins": "*"}, r"/health": {"origins": "*"}},
     supports_credentials=False,
 )
 
