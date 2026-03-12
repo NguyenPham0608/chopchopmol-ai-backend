@@ -35,20 +35,78 @@ MACE_DTYPE = "float64" if MACE_DEVICE != "mps" else "float32"
 # DFT (PySCF) constants and GPU detection
 HARTREE_TO_EV = 27.211386245988
 BOHR_TO_ANG = 0.529177210903
-_dft_use_gpu = None
+_dft_gpu_rks = None
+_dft_gpu_checked = False
 
 
-def get_dft_use_gpu():
-    global _dft_use_gpu
-    if _dft_use_gpu is None:
+# Fix pyscf.dispersion incompatibility with numpy 2.x by bridging standalone dftd3/dftd4
+def _patch_pyscf_dispersion():
+    """Replace broken pyscf.dispersion.dftd3/dftd4 with standalone package wrappers."""
+    import sys
+    import types
+
+    try:
+        from dftd3.pyscf import DFTD3Dispersion as _StandaloneD3
+
+        class DFTD3Dispersion:
+            """Wrapper adapting standalone dftd3 to pyscf's expected interface."""
+
+            def __init__(self, mol, xc="hf", version="d3bj", atm=False):
+                self._d3 = _StandaloneD3(mol, xc=xc, version=version, atm=bool(atm))
+
+            def get_dispersion(self, grad=False):
+                e, g = self._d3.kernel()
+                res = {"energy": float(e)}
+                if grad:
+                    res["gradient"] = g
+                return res
+
+        mod = types.ModuleType("pyscf.dispersion.dftd3")
+        mod.DFTD3Dispersion = DFTD3Dispersion
+        sys.modules["pyscf.dispersion.dftd3"] = mod
+    except ImportError:
+        pass
+
+    try:
+        from dftd4.pyscf import DFTD4Dispersion as _StandaloneD4
+
+        class DFTD4Dispersion:
+            """Wrapper adapting standalone dftd4 to pyscf's expected interface."""
+
+            def __init__(self, mol, xc="hf", atm=False):
+                self._d4 = _StandaloneD4(mol, xc=xc, atm=bool(atm))
+
+            def get_dispersion(self, grad=False):
+                e, g = self._d4.kernel()
+                res = {"energy": float(e)}
+                if grad:
+                    res["gradient"] = g
+                return res
+
+        mod = types.ModuleType("pyscf.dispersion.dftd4")
+        mod.DFTD4Dispersion = DFTD4Dispersion
+        sys.modules["pyscf.dispersion.dftd4"] = mod
+    except ImportError:
+        pass
+
+
+_patch_pyscf_dispersion()
+
+
+def get_dft_rks():
+    """Return gpu4pyscf.dft.rks module if GPU available, else None (use CPU)."""
+    global _dft_gpu_rks, _dft_gpu_checked
+    if not _dft_gpu_checked:
+        _dft_gpu_checked = True
         try:
-            import cupy
-            cupy.cuda.runtime.getDeviceCount()
-            from gpu4pyscf.dft import rks as gpu_rks  # noqa: F401
-            _dft_use_gpu = True
+            from gpu4pyscf.dft import rks as gpu_rks
+
+            _dft_gpu_rks = gpu_rks
+            print("DFT: GPU acceleration enabled (gpu4pyscf)")
         except Exception:
-            _dft_use_gpu = False
-    return _dft_use_gpu
+            _dft_gpu_rks = None
+            print("DFT: Using CPU (pyscf)")
+    return _dft_gpu_rks
 
 
 # Lazy-load MACE to avoid slow startup
@@ -91,31 +149,31 @@ def get_mace_calculator(model_id="mace-mp-0a"):
     return _mace_calculators[model_id]
 
 
-def compute_dft_energy(atoms_data, basis="def2-tzvppd", xc="wb97m-d3bj",
-                       charge=0, spin=0, include_forces=True, conv_tol=1e-10):
-    """Single-point DFT energy + forces using PySCF (GPU when available)."""
+def compute_dft_energy(
+    atoms_data,
+    basis="def2-tzvppd",
+    xc="wb97m-d3bj",
+    charge=0,
+    spin=0,
+    include_forces=True,
+    conv_tol=1e-10,
+):
+    """Single-point DFT energy + forces using PySCF. GPU-accelerated when available."""
     import pyscf
-    from pyscf.dft import rks as cpu_rks
 
     atom_list = [(a["element"], (a["x"], a["y"], a["z"])) for a in atoms_data]
-    mol = pyscf.M(
-        atom=atom_list,
-        basis=basis,
-        charge=charge,
-        spin=spin,
-        verbose=0,
-    )
+    mol = pyscf.M(atom=atom_list, basis=basis, charge=charge, spin=spin, verbose=0)
 
-    use_gpu = get_dft_use_gpu()
-    if use_gpu:
-        from gpu4pyscf.dft import rks as gpu_rks
+    gpu_rks = get_dft_rks()
+    if gpu_rks is not None:
         mf = gpu_rks.RKS(mol, xc=xc).density_fit()
     else:
+        from pyscf.dft import rks as cpu_rks
+
         mf = cpu_rks.RKS(mol, xc=xc).density_fit()
 
     mf.conv_tol = conv_tol
     mf.grids.atom_grid = (99, 590)
-
     energy_hartree = mf.kernel()
 
     result = {
@@ -126,13 +184,12 @@ def compute_dft_energy(atoms_data, basis="def2-tzvppd", xc="wb97m-d3bj",
         "xc": xc,
         "charge": charge,
         "spin": spin,
-        "gpu": use_gpu,
+        "gpu": gpu_rks is not None,
     }
 
     if include_forces:
         g = mf.nuc_grad_method()
         gradient = np.asarray(g.kernel())
-        # gradient is Hartree/Bohr → convert to eV/Angstrom
         forces_ev_ang = -gradient * HARTREE_TO_EV / BOHR_TO_ANG
         result["forces"] = forces_ev_ang.tolist()
         result["max_force"] = float(np.max(np.linalg.norm(forces_ev_ang, axis=1)))
@@ -147,7 +204,11 @@ def dumps(obj):
 app = Flask(__name__)
 CORS(
     app,
-    resources={r"/ai/*": {"origins": "*"}, r"/api/*": {"origins": "*"}, r"/health": {"origins": "*"}},
+    resources={
+        r"/ai/*": {"origins": "*"},
+        r"/api/*": {"origins": "*"},
+        r"/health": {"origins": "*"},
+    },
     supports_credentials=False,
 )
 
@@ -437,8 +498,8 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"angle_scan","description":"Angle scan: rotate fragment through angle range around pivot atom2 (A-B-C). Returns frameCount. Follow with calculate_all_energies then create_chart.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom (0-based)"},"atom2":{"type":"integer","description":"Pivot atom (0-based)"},"atom3":{"type":"integer","description":"Third atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Atoms to rotate (0-based)"},"increment":{"type":"number","description":"Step degrees (default: 10)"},"startAngle":{"type":"number","description":"Start (default: 0)"},"endAngle":{"type":"number","description":"End (default: 360)"}},"required":["atom1","atom2","atom3"]}}},
   {"type":"function","function":{"name":"calculate_energy","description":"Single-point MACE energy for current geometry. Returns energy_eV and per-atom forces by default (needed for toggle_force_arrows). Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"calculate_all_energies","description":"Batch MACE energy for all frames. Returns energies array with scanXValues for charting. Required after any scan. Follow with create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"mace-mp-0a (fast), mace-mp-0b3 (high-P), mace-mpa-0 (accurate)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"calculate_dft_energy","description":"Single-point DFT energy using PySCF quantum chemistry. Much slower than MACE (minutes vs seconds) but more accurate. Best for small molecules (<100 atoms). Returns energy_eV, energy_hartree, and per-atom forces.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set (default: def2-tzvppd). Common: def2-svp (fast), def2-tzvp, def2-tzvppd (accurate), cc-pvdz, cc-pvtz, 6-31g*"},"xc":{"type":"string","description":"DFT exchange-correlation functional (default: wb97m-d3bj). Common: b3lyp, pbe, pbe0, wb97x-d, wb97m-d3bj (recommended)"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin multiplicity minus 1 (default: 0 = singlet, 1 = doublet, 2 = triplet)"},"includeForces":{"type":"boolean","description":"Include per-atom forces via gradient (default: true)"}},"required":[]}}},
-  {"type":"function","function":{"name":"calculate_all_dft_energies","description":"Batch DFT energy for all loaded frames using PySCF. Very slow — limit to <=20 frames and <100 atoms. Use MACE for larger systems. Returns energies array. Follow with create_chart.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set (default: def2-tzvppd)"},"xc":{"type":"string","description":"DFT functional (default: wb97m-d3bj)"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin (default: 0)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":[]}}},
+  {"type":"function","function":{"name":"calculate_dft_energy","description":"Single-point DFT energy using PySCF quantum chemistry (GPU-accelerated when available). More accurate than MACE but slower. Returns energy_eV, energy_hartree, and per-atom forces.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set (default: def2-tzvppd). Common: def2-svp (fast), def2-tzvp, def2-tzvppd (accurate), cc-pvdz, cc-pvtz, 6-31g*"},"xc":{"type":"string","description":"DFT exchange-correlation functional (default: wb97m-d3bj). Common: b3lyp, pbe, pbe0, wb97x-d, wb97m-d3bj (recommended)"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin multiplicity minus 1 (default: 0 = singlet, 1 = doublet, 2 = triplet)"},"includeForces":{"type":"boolean","description":"Include per-atom forces via gradient (default: true)"}},"required":[]}}},
+  {"type":"function","function":{"name":"calculate_all_dft_energies","description":"Batch DFT energy for all loaded frames using PySCF (GPU-accelerated). More accurate than MACE. Returns energies array. Follow with create_chart.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set (default: def2-tzvppd)"},"xc":{"type":"string","description":"DFT functional (default: wb97m-d3bj)"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin (default: 0)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":[]}}},
   {"type":"function","function":{"name":"optimize_geometry","description":"MACE geometry optimization. Returns converged, steps, energy_eV, trajectory, and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"small (fast), medium (balanced), large (accurate), mace-mpa-0 (best)"},"fmax":{"type":"number","description":"Force threshold eV/A (default: 0.05)"},"maxSteps":{"type":"integer","description":"Max steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"run_md","description":"MACE molecular dynamics (Langevin NVT). Returns trajectory frameCount and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model. Use 'frames' to control exact output frame count (preferred over steps/saveInterval).","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model"},"temperature":{"type":"number","description":"Temp in K (default: 300)"},"frames":{"type":"integer","description":"Exact number of output frames desired. Overrides steps/saveInterval. E.g. frames=10 produces exactly 10 frames."},"steps":{"type":"integer","description":"MD steps (default: 500). Ignored if frames is set."},"timestep":{"type":"number","description":"fs (default: 1.0)"},"friction":{"type":"number","description":"1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save every N steps (default: 10). Ignored if frames is set."},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"load_molecule","description":"Load molecule by name from PubChem (e.g. caffeine, aspirin). Follow with get_molecule_info to inspect.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Molecule name"}},"required":["name"]}}},
@@ -602,7 +663,7 @@ EXECUTE_PYTHON — auto-injected variables (no need to call other tools first):
 RULES:
 1. Atom indices: 0-based.
 2. ALWAYS ask user for MACE model (mace-mp-0a, mace-mp-0b3, mace-mpa-0) before energy/optimization/MD unless already specified.
-3. For DFT calculations (calculate_dft_energy, calculate_all_dft_energies): use for small molecules needing reference-quality energies. Recommend MACE for molecules >30 atoms. Default: wb97m-d3bj/def2-tzvppd.
+3. For DFT calculations (calculate_dft_energy, calculate_all_dft_energies): GPU-accelerated PySCF. More accurate than MACE but slower. Default: wb97m-d3bj/def2-tzvppd. Use def2-svp for faster results.
 4. Tool results include nextSteps hints — follow them for multi-step workflows.
 5. If CachedEnergies=Y, use get_cached_energies instead of recalculating.
 6. Brief responses (1-2 sentences). Execute tools immediately. Minimize tool calls — do as much as possible in a single execute_python call.
@@ -1597,9 +1658,6 @@ def calculate_dft_energy_endpoint():
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
 
-    if len(atoms_data) > 100:
-        return jsonify({"error": f"DFT is impractical for {len(atoms_data)} atoms. Use MACE (calculate_energy) for large molecules."}), 400
-
     try:
         result = compute_dft_energy(
             atoms_data,
@@ -1614,6 +1672,7 @@ def calculate_dft_energy_endpoint():
         return jsonify(result)
     except Exception as e:
         import traceback
+
         print(f"DFT Energy Error: {str(e)}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1628,12 +1687,6 @@ def calculate_dft_energy_batch_endpoint():
     if not frames_data:
         return jsonify({"error": "No frames provided"}), 400
 
-    if len(frames_data[0]) > 100:
-        return jsonify({"error": f"DFT is impractical for {len(frames_data[0])} atoms. Use MACE."}), 400
-
-    if len(frames_data) > 20:
-        return jsonify({"error": f"DFT batch of {len(frames_data)} frames would take too long. Limit to 20 frames or use MACE."}), 400
-
     basis = data.get("basis", "def2-tzvppd")
     xc = data.get("xc", "wb97m-d3bj")
     charge = data.get("charge", 0)
@@ -1645,8 +1698,11 @@ def calculate_dft_energy_batch_endpoint():
         results = []
         for i, atoms_data in enumerate(frames_data):
             frame_result = compute_dft_energy(
-                atoms_data, basis=basis, xc=xc,
-                charge=charge, spin=spin,
+                atoms_data,
+                basis=basis,
+                xc=xc,
+                charge=charge,
+                spin=spin,
                 include_forces=include_forces,
                 conv_tol=conv_tol,
             )
@@ -1657,17 +1713,20 @@ def calculate_dft_energy_batch_endpoint():
         min_idx = int(np.argmin(energies))
         max_idx = int(np.argmax(energies))
 
-        return jsonify({
-            "success": True,
-            "frameCount": len(results),
-            "energies": results,
-            "lowestEnergyFrame": min_idx,
-            "highestEnergyFrame": max_idx,
-            "energyRange_eV": round(max(energies) - min(energies), 6),
-            "method": f"DFT {xc}/{basis}",
-        })
+        return jsonify(
+            {
+                "success": True,
+                "frameCount": len(results),
+                "energies": results,
+                "lowestEnergyFrame": min_idx,
+                "highestEnergyFrame": max_idx,
+                "energyRange_eV": round(max(energies) - min(energies), 6),
+                "method": f"DFT {xc}/{basis}",
+            }
+        )
     except Exception as e:
         import traceback
+
         print(f"DFT batch error: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

@@ -11,6 +11,8 @@ ase
 matplotlib
 paramiko
 pyscf
+dftd3
+dftd4
 scikit-image
 cuequivariance
 gpu4pyscf-cuda12x
