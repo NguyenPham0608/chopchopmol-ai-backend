@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+export DOCKER_HOST=unix:///Users/buupham/.docker/run/docker.sock
+
 IMAGE="nguyen51304/chopchopmol-backend"
 TAG="${1:-latest}"
 
