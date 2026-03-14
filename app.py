@@ -1,6 +1,3 @@
-import multiprocessing
-multiprocessing.set_start_method('spawn', force=True)
-
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
@@ -2854,4 +2851,4 @@ print(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
