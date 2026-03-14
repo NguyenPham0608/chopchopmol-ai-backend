@@ -23,12 +23,18 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 WORKDIR /app
 
-# Install PyTorch with CUDA first (big cached layer)
+# Install PyTorch with CUDA 12.4 (big cached layer)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 
-# Install requirements
+# Install cupy for gpu4pyscf GPU acceleration
+RUN pip install --no-cache-dir cupy-cuda12x
+
+# Install remaining requirements, SKIP torch so we keep the CUDA version
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/stdin
+
+# Verify GPU support is intact
+RUN python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available!'; print(f'PyTorch {torch.__version__} with CUDA {torch.version.cuda}')"
 
 # Copy app code
 COPY app.py .

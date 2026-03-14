@@ -30,7 +30,7 @@ TORCH_DEVICE = get_torch_device()
 # MACE models contain float64 weights which MPS can't load directly,
 # so MACE must run on CPU. MPS is still used for orbital tensor math (float32).
 MACE_DEVICE = "cpu" if TORCH_DEVICE == "mps" else TORCH_DEVICE
-MACE_DTYPE = "float64" if MACE_DEVICE != "mps" else "float32"
+MACE_DTYPE = "float32"
 
 # DFT (PySCF) constants and GPU detection
 HARTREE_TO_EV = 27.211386245988
@@ -1378,7 +1378,7 @@ def optimize_geometry():
             "small": "small",
             "medium": "medium",
             "large": "large",
-            "mace-mpa-0": "medium",
+            "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"],
         }
 
         mace_model = model_map.get(model_name, "medium")
@@ -1560,7 +1560,7 @@ def run_molecular_dynamics():
             "small": "small",
             "medium": "medium",
             "large": "large",
-            "mace-mpa-0": "medium",
+            "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"],
         }
         mace_model = model_map.get(model_name, "medium")
 
@@ -2845,8 +2845,12 @@ def remote_status():
 
 
 print(
-    f"Torch device: {TORCH_DEVICE} | MACE device: {MACE_DEVICE} | Orbital tensors: {TORCH_DEVICE}"
+    f"Torch device: {TORCH_DEVICE} | MACE device: {MACE_DEVICE} | MACE dtype: {MACE_DTYPE} | Orbital tensors: {TORCH_DEVICE}"
 )
+if TORCH_DEVICE == "cuda":
+    print(f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+# Eagerly check DFT GPU support at startup
+get_dft_rks()
 # ============================================================================
 
 if __name__ == "__main__":
