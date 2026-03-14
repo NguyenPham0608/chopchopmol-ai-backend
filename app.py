@@ -1,3 +1,6 @@
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
