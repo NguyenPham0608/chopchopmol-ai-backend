@@ -34,5 +34,4 @@ exec gunicorn app:app \
     --workers 1 \
     --threads 4 \
     --timeout 600 \
-    --preload \
     --bind 0.0.0.0:10000
