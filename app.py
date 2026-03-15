@@ -1728,6 +1728,208 @@ def run_molecular_dynamics():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+# ── Streaming MACE Endpoints (real-time frame-by-frame) ────────────────────
+
+
+@app.route("/ai/mace/md/stream", methods=["POST"])
+def run_md_stream():
+    """Streaming MD — yields SSE frame events in real-time."""
+    import queue
+    import threading
+    from ase import Atoms, units
+    from ase.md.langevin import Langevin
+    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+    from mace.calculators import mace_mp
+
+    data = request.json
+    atoms_data = data.get("atoms", [])
+    if not atoms_data:
+        return jsonify({"error": "No atoms provided"}), 400
+
+    temperature_K = data.get("temperature", 300)
+    timestep_fs = data.get("timestep", 1.0)
+    friction = data.get("friction", 0.01)
+    include_forces = data.get("includeForces", True)
+    requested_frames = data.get("frames")
+    save_interval = data.get("saveInterval", 10)
+
+    if requested_frames and requested_frames >= 2:
+        n_steps = (requested_frames - 1) * save_interval
+    elif requested_frames == 1:
+        save_interval = 1
+        n_steps = 0
+    else:
+        n_steps = data.get("steps", 500)
+
+    model_name = data.get("model", "medium")
+    model_map = {"small": "small", "medium": "medium", "large": "large",
+                 "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
+    mace_model = model_map.get(model_name, "medium")
+
+    q = queue.Queue()
+
+    def worker():
+        try:
+            symbols = [a["element"] for a in atoms_data]
+            positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
+            pos_min = positions.min(axis=0)
+            pos_max = positions.max(axis=0)
+            cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
+
+            atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+            calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
+            atoms.calc = calc
+            MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
+
+            frame_index = [0]
+
+            def observer():
+                pos = atoms.get_positions().copy()
+                energy = float(atoms.get_potential_energy())
+                kinetic = float(atoms.get_kinetic_energy())
+                temp = float(kinetic / (1.5 * len(atoms) * units.kB))
+                frame = {
+                    "type": "frame",
+                    "index": frame_index[0],
+                    "positions": pos.tolist(),
+                    "energy_eV": energy,
+                    "kinetic_eV": kinetic,
+                    "total_eV": energy + kinetic,
+                    "temperature_K": temp,
+                    "step": frame_index[0] * save_interval,
+                }
+                if include_forces:
+                    forces = atoms.get_forces()
+                    frame["forces"] = forces.tolist()
+                    frame["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
+                q.put(frame)
+                frame_index[0] += 1
+
+            dyn = Langevin(atoms, timestep=timestep_fs * units.fs,
+                           temperature_K=temperature_K, friction=friction / units.fs)
+            dyn.attach(observer, interval=save_interval)
+            observer()  # initial frame
+            dyn.run(n_steps)
+
+            final_energy = float(atoms.get_potential_energy())
+            q.put({"type": "done", "summary": {
+                "success": True, "steps": n_steps,
+                "temperature_K": temperature_K, "timestep_fs": timestep_fs,
+                "energy_eV": final_energy, "energy_kcal": final_energy * 23.0609,
+                "frameCount": frame_index[0],
+            }})
+        except Exception as e:
+            q.put({"type": "error", "error": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                item = q.get(timeout=120)
+            except queue.Empty:
+                yield f"data: {dumps({'type': 'error', 'error': 'Timeout'})}\n\n"
+                break
+            yield f"data: {dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/ai/mace/optimize/stream", methods=["POST"])
+def optimize_geometry_stream():
+    """Streaming optimization — yields SSE frame events per BFGS step."""
+    import queue
+    import threading
+    from ase import Atoms
+    from ase.optimize import BFGS
+    from mace.calculators import mace_mp
+
+    data = request.json
+    atoms_data = data.get("atoms", [])
+    if not atoms_data:
+        return jsonify({"error": "No atoms provided"}), 400
+
+    fmax = data.get("fmax", 0.05)
+    max_steps = data.get("maxSteps", 100)
+    include_forces = data.get("includeForces", True)
+    model_name = data.get("model", "medium")
+    model_map = {"small": "small", "medium": "medium", "large": "large",
+                 "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
+    mace_model = model_map.get(model_name, "medium")
+
+    q = queue.Queue()
+
+    def worker():
+        try:
+            symbols = [a["element"] for a in atoms_data]
+            positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
+            pos_min = positions.min(axis=0)
+            pos_max = positions.max(axis=0)
+            cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
+
+            atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+            calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
+            atoms.calc = calc
+
+            frame_index = [0]
+
+            def observer():
+                pos = atoms.get_positions().copy()
+                energy = float(atoms.get_potential_energy())
+                forces = atoms.get_forces()
+                max_f = float(np.max(np.linalg.norm(forces, axis=1)))
+                frame = {
+                    "type": "frame",
+                    "index": frame_index[0],
+                    "positions": pos.tolist(),
+                    "energy_eV": energy,
+                    "max_force": max_f,
+                }
+                if include_forces:
+                    frame["forces"] = forces.tolist()
+                q.put(frame)
+                frame_index[0] += 1
+
+            opt = BFGS(atoms, logfile=None, trajectory=None, restart=None)
+            opt.attach(observer, interval=1)
+            opt.run(fmax=fmax, steps=max_steps)
+
+            forces = atoms.get_forces()
+            max_force = float(np.max(np.linalg.norm(forces, axis=1)))
+            q.put({"type": "done", "summary": {
+                "success": True,
+                "converged": bool(max_force < fmax),
+                "steps": int(opt.nsteps),
+                "energy_eV": float(atoms.get_potential_energy()),
+                "energy_kcal": float(atoms.get_potential_energy()) * 23.0609,
+                "max_force": max_force,
+                "frameCount": frame_index[0],
+            }})
+        except Exception as e:
+            q.put({"type": "error", "error": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                item = q.get(timeout=120)
+            except queue.Empty:
+                yield f"data: {dumps({'type': 'error', 'error': 'Timeout'})}\n\n"
+                break
+            yield f"data: {dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ── DFT (PySCF) Endpoints ──────────────────────────────────────────────────
 
 
