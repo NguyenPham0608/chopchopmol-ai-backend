@@ -766,6 +766,16 @@ EXECUTE_PYTHON — auto-injected variables (no need to call other tools first):
 - Do NOT call get_molecule_info or get_cached_energies before execute_python — the data is already injected.
 - Write the code correctly the first time. Check the variable docs above — energies is a numpy array, not a list of dicts.
 
+TRAINING DATA GENERATION (when user says "generate training data", "make training data", or similar):
+1. ASK user: How many frames? (e.g. 10, 50, 100)
+2. ASK user: Which MACE model for MD sampling? (small/medium/large/mace-mpa-0)
+3. ASK user: DFT settings — basis set and functional (xc). Also ask charge and spin if not obvious.
+4. run_md(model=chosen_mace_model, frames=N) — generate trajectory frames via MACE MD
+5. calculate_all_dft_energies(basis=chosen_basis, xc=chosen_xc) — compute DFT energies+forces for ALL frames. These REPLACE the MACE energies.
+6. save_file(filename="training_data_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true) — save ExtXYZ with DFT energies and forces (NOT MACE energies)
+7. Tell user: "Saved N frames with DFT energies to training_data_....extxyz"
+IMPORTANT: The saved file must contain DFT energies and DFT forces, not MACE. The MACE MD is only for generating diverse geometries.
+
 RULES:
 1. Atom indices: 0-based.
 2. ALWAYS ask user for MACE model (mace-mp-0a, mace-mp-0b3, mace-mpa-0) before energy/optimization/MD unless already specified.
