@@ -1739,7 +1739,6 @@ def run_md_stream():
     from ase import Atoms, units
     from ase.md.langevin import Langevin
     from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-    from mace.calculators import mace_mp
 
     data = request.json
     atoms_data = data.get("atoms", [])
@@ -1762,9 +1761,13 @@ def run_md_stream():
         n_steps = data.get("steps", 500)
 
     model_name = data.get("model", "medium")
+
+    # Pre-load calculator in the request thread (uses cache — fast)
     model_map = {"small": "small", "medium": "medium", "large": "large",
                  "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
     mace_model = model_map.get(model_name, "medium")
+    from mace.calculators import mace_mp
+    calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
 
     q = queue.Queue()
 
@@ -1777,7 +1780,6 @@ def run_md_stream():
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
             atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
-            calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
             atoms.calc = calc
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
 
@@ -1846,7 +1848,6 @@ def optimize_geometry_stream():
     import threading
     from ase import Atoms
     from ase.optimize import BFGS
-    from mace.calculators import mace_mp
 
     data = request.json
     atoms_data = data.get("atoms", [])
@@ -1861,6 +1862,10 @@ def optimize_geometry_stream():
                  "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
     mace_model = model_map.get(model_name, "medium")
 
+    # Pre-load calculator in the request thread (uses cache — fast)
+    from mace.calculators import mace_mp
+    calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
+
     q = queue.Queue()
 
     def worker():
@@ -1872,7 +1877,6 @@ def optimize_geometry_stream():
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
             atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
-            calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
             atoms.calc = calc
 
             frame_index = [0]
