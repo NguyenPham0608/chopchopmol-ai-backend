@@ -284,13 +284,17 @@ def warmup_mace():
     t0 = time()
     try:
         calc = get_mace_calculator("mace-mp-0a")
-        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=False)
+        atoms = Atoms(
+            "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=False
+        )
         atoms.calc = calc
         atoms.get_potential_energy()
         atoms.get_forces()
         print(f"MACE warmup complete in {time() - t0:.1f}s (device={MACE_DEVICE})")
     except Exception as e:
-        print(f"MACE warmup failed after {time() - t0:.1f}s: {e} — first request will be slow")
+        print(
+            f"MACE warmup failed after {time() - t0:.1f}s: {e} — first request will be slow"
+        )
 
 
 def dumps(obj):
@@ -1540,7 +1544,9 @@ def calculate_energy_batch():
 
         # Use native torch_geometric batching (5-10x faster), fall back to ASE loop
         try:
-            results = _calculate_energy_batch_native(frames_data, model_id, include_forces)
+            results = _calculate_energy_batch_native(
+                frames_data, model_id, include_forces
+            )
         except Exception as e:
             print(f"Native batch failed ({e}), falling back to ASE loop")
             calc = get_mace_calculator(model_id)
@@ -1626,7 +1632,9 @@ def run_molecular_dynamics():
         positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
 
         pos_min = positions.min(axis=0) if len(positions) > 0 else np.array([0, 0, 0])
-        pos_max = positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
+        pos_max = (
+            positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
+        )
         cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
         atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
@@ -1759,7 +1767,9 @@ def run_md_stream():
             pos_max = positions.max(axis=0)
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
-            atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+            atoms = Atoms(
+                symbols=symbols, positions=positions, cell=cell_size, pbc=False
+            )
             atoms.calc = calc
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
 
@@ -1787,19 +1797,31 @@ def run_md_stream():
                 q.put(frame)
                 frame_index[0] += 1
 
-            dyn = Langevin(atoms, timestep=timestep_fs * units.fs,
-                           temperature_K=temperature_K, friction=friction / units.fs)
+            dyn = Langevin(
+                atoms,
+                timestep=timestep_fs * units.fs,
+                temperature_K=temperature_K,
+                friction=friction / units.fs,
+            )
             dyn.attach(observer, interval=save_interval)
             observer()  # initial frame
             dyn.run(n_steps)
 
             final_energy = float(atoms.get_potential_energy())
-            q.put({"type": "done", "summary": {
-                "success": True, "steps": n_steps,
-                "temperature_K": temperature_K, "timestep_fs": timestep_fs,
-                "energy_eV": final_energy, "energy_kcal": final_energy * 23.0609,
-                "frameCount": frame_index[0],
-            }})
+            q.put(
+                {
+                    "type": "done",
+                    "summary": {
+                        "success": True,
+                        "steps": n_steps,
+                        "temperature_K": temperature_K,
+                        "timestep_fs": timestep_fs,
+                        "energy_eV": final_energy,
+                        "energy_kcal": final_energy * 23.0609,
+                        "frameCount": frame_index[0],
+                    },
+                }
+            )
         except Exception as e:
             q.put({"type": "error", "error": str(e)})
 
@@ -1817,8 +1839,11 @@ def run_md_stream():
             if item.get("type") in ("done", "error"):
                 break
 
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/ai/mace/optimize/stream", methods=["POST"])
@@ -1852,7 +1877,9 @@ def optimize_geometry_stream():
             pos_max = positions.max(axis=0)
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
-            atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+            atoms = Atoms(
+                symbols=symbols, positions=positions, cell=cell_size, pbc=False
+            )
             atoms.calc = calc
 
             frame_index = [0]
@@ -1880,15 +1907,20 @@ def optimize_geometry_stream():
 
             forces = atoms.get_forces()
             max_force = float(np.max(np.linalg.norm(forces, axis=1)))
-            q.put({"type": "done", "summary": {
-                "success": True,
-                "converged": bool(max_force < fmax),
-                "steps": int(opt.nsteps),
-                "energy_eV": float(atoms.get_potential_energy()),
-                "energy_kcal": float(atoms.get_potential_energy()) * 23.0609,
-                "max_force": max_force,
-                "frameCount": frame_index[0],
-            }})
+            q.put(
+                {
+                    "type": "done",
+                    "summary": {
+                        "success": True,
+                        "converged": bool(max_force < fmax),
+                        "steps": int(opt.nsteps),
+                        "energy_eV": float(atoms.get_potential_energy()),
+                        "energy_kcal": float(atoms.get_potential_energy()) * 23.0609,
+                        "max_force": max_force,
+                        "frameCount": frame_index[0],
+                    },
+                }
+            )
         except Exception as e:
             q.put({"type": "error", "error": str(e)})
 
@@ -1906,8 +1938,11 @@ def optimize_geometry_stream():
             if item.get("type") in ("done", "error"):
                 break
 
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── DFT (PySCF) Endpoints ──────────────────────────────────────────────────
@@ -3113,7 +3148,9 @@ print(
 )
 try:
     if TORCH_DEVICE == "cuda":
-        print(f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        print(
+            f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB"
+        )
 except Exception as e:
     print(f"CUDA info unavailable: {e}")
 # Eagerly check DFT GPU support at startup
