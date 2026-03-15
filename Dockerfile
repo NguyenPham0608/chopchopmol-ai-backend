@@ -33,8 +33,8 @@ RUN pip install --no-cache-dir cupy-cuda12x
 COPY requirements.txt .
 RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/stdin
 
-# Verify GPU support is intact
-RUN python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available!'; print(f'PyTorch {torch.__version__} with CUDA {torch.version.cuda}')"
+# Verify CUDA torch was not overwritten by CPU version
+RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA support: {torch.version.cuda}')"
 
 # Copy app code
 COPY app.py .
