@@ -280,17 +280,23 @@ def _calculate_energy_batch_native(frames_data, model_id, include_forces):
 
 
 def warmup_mace():
-    """Preload MACE calculators and JIT-compile GPU kernels with a tiny H2 calculation."""
+    """Preload ALL common MACE calculators and JIT-compile GPU kernels."""
     t0 = time()
+    models_to_warm = ["mace-mp-0a", "small", "medium"]
     try:
-        calc = get_mace_calculator("mace-mp-0a")
-        atoms = Atoms(
+        test_atoms = Atoms(
             "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=False
         )
-        atoms.calc = calc
-        atoms.get_potential_energy()
-        atoms.get_forces()
-        print(f"MACE warmup complete in {time() - t0:.1f}s (device={MACE_DEVICE})")
+        for model_id in models_to_warm:
+            t1 = time()
+            calc = get_mace_calculator(model_id)
+            test_atoms.calc = calc
+            test_atoms.get_potential_energy()
+            test_atoms.get_forces()
+            print(f"  Warmed {model_id} in {time() - t1:.1f}s")
+        print(
+            f"MACE warmup complete in {time() - t0:.1f}s (device={MACE_DEVICE}, {len(models_to_warm)} models)"
+        )
     except Exception as e:
         print(
             f"MACE warmup failed after {time() - t0:.1f}s: {e} — first request will be slow"
