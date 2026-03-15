@@ -138,13 +138,27 @@ MACE_MODELS = {
 
 
 def get_mace_calculator(model_id="mace-mp-0a"):
+    """Get a cached MACE calculator. Accepts energy model IDs (mace-mp-0a, etc.)
+    and optimizer/MD model names (small, medium, large)."""
     global _mace_calculators
     if model_id not in _mace_calculators:
         from mace.calculators import mace_mp
 
-        model_url = MACE_MODELS.get(model_id, MACE_MODELS["mace-mp-0a"])["url"]
+        # Map optimizer/MD names to mace_mp model args
+        model_map = {
+            "small": "small",
+            "medium": "medium",
+            "large": "large",
+        }
+        if model_id in model_map:
+            model_url = model_map[model_id]
+        elif model_id in MACE_MODELS:
+            model_url = MACE_MODELS[model_id]["url"]
+        else:
+            model_url = MACE_MODELS["mace-mp-0a"]["url"]
+
         _mace_calculators[model_id] = mace_mp(
-            model=model_url, default_dtype="float32", device=MACE_DEVICE
+            model=model_url, default_dtype=MACE_DTYPE, device=MACE_DEVICE
         )
     return _mace_calculators[model_id]
 
@@ -1427,7 +1441,6 @@ def optimize_geometry():
     """Geometry optimization using MACE-MP + ASE BFGS"""
     from ase import Atoms
     from ase.optimize import BFGS
-    from mace.calculators import mace_mp
     import traceback
     import numpy as np
 
@@ -1444,7 +1457,6 @@ def optimize_geometry():
         symbols = [a["element"] for a in atoms_data]
         positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
 
-        # Create atoms object with a large enough cell for molecules
         pos_min = positions.min(axis=0) if len(positions) > 0 else np.array([0, 0, 0])
         pos_max = (
             positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
@@ -1453,19 +1465,8 @@ def optimize_geometry():
 
         atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
 
-        # Get model name and initialize MACE calculator
         model_name = data.get("model", "medium")
-
-        model_map = {
-            "small": "small",
-            "medium": "medium",
-            "large": "large",
-            "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"],
-        }
-
-        mace_model = model_map.get(model_name, "medium")
-        calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
-        atoms.calc = calc
+        atoms.calc = get_mace_calculator(model_name)
 
         # Store trajectory frames
         trajectory_frames = []
@@ -1596,19 +1597,16 @@ def run_molecular_dynamics():
     from ase import Atoms, units
     from ase.md.langevin import Langevin
     from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-    from mace.calculators import mace_mp
     import traceback
     import numpy as np
 
     data = request.json
     atoms_data = data.get("atoms", [])
-    temperature_K = data.get("temperature", 300)  # Kelvin
-    timestep_fs = data.get("timestep", 1.0)  # femtoseconds
-    friction = data.get("friction", 0.01)  # 1/fs
+    temperature_K = data.get("temperature", 300)
+    timestep_fs = data.get("timestep", 1.0)
+    friction = data.get("friction", 0.01)
     include_forces = data.get("includeForces", True)
 
-    # If 'frames' is specified, compute steps/saveInterval to produce exact frame count
-    # Total frames = 1 (initial) + floor(steps / saveInterval)
     requested_frames = data.get("frames")
     if requested_frames and requested_frames >= 2:
         save_interval = data.get("saveInterval", 10)
@@ -1627,29 +1625,15 @@ def run_molecular_dynamics():
         symbols = [a["element"] for a in atoms_data]
         positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
 
-        # Create atoms object
         pos_min = positions.min(axis=0) if len(positions) > 0 else np.array([0, 0, 0])
-        pos_max = (
-            positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
-        )
+        pos_max = positions.max(axis=0) if len(positions) > 0 else np.array([10, 10, 10])
         cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
         atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
 
-        # Initialize MACE calculator
         model_name = data.get("model", "medium")
-        model_map = {
-            "small": "small",
-            "medium": "medium",
-            "large": "large",
-            "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"],
-        }
-        mace_model = model_map.get(model_name, "medium")
+        atoms.calc = get_mace_calculator(model_name)
 
-        calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
-        atoms.calc = calc
-
-        # Initialize velocities from Maxwell-Boltzmann distribution
         MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
 
         # Store trajectory frames
@@ -1762,12 +1746,8 @@ def run_md_stream():
 
     model_name = data.get("model", "medium")
 
-    # Pre-load calculator in the request thread (uses cache — fast)
-    model_map = {"small": "small", "medium": "medium", "large": "large",
-                 "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
-    mace_model = model_map.get(model_name, "medium")
-    from mace.calculators import mace_mp
-    calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
+    # Pre-load calculator (uses cache — instant after first call)
+    calc = get_mace_calculator(model_name)
 
     q = queue.Queue()
 
@@ -1858,13 +1838,9 @@ def optimize_geometry_stream():
     max_steps = data.get("maxSteps", 100)
     include_forces = data.get("includeForces", True)
     model_name = data.get("model", "medium")
-    model_map = {"small": "small", "medium": "medium", "large": "large",
-                 "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"]}
-    mace_model = model_map.get(model_name, "medium")
 
-    # Pre-load calculator in the request thread (uses cache — fast)
-    from mace.calculators import mace_mp
-    calc = mace_mp(model=mace_model, device=MACE_DEVICE, default_dtype=MACE_DTYPE)
+    # Pre-load calculator (uses cache — instant after first call)
+    calc = get_mace_calculator(model_name)
 
     q = queue.Queue()
 
