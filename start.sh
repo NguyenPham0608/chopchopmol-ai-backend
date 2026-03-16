@@ -28,6 +28,10 @@ printenv | grep -E '^[A-Z_][A-Z0-9_]*=' \
     > /etc/rp_environment 2>/dev/null || true
 echo 'source /etc/rp_environment' >> ~/.bashrc 2>/dev/null || true
 
-# ── Start app (foreground, no forking — CUDA requires it) ──
+# ── Start gunicorn (no --preload so CUDA inits in worker, not master) ──
 echo "Starting ChopChopMol backend on :10000 ..."
-exec python /app/app.py
+exec gunicorn app:app \
+    --workers 1 \
+    --threads 4 \
+    --timeout 600 \
+    --bind 0.0.0.0:10000

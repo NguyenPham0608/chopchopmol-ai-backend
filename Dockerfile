@@ -36,13 +36,10 @@ RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/std
 # Verify CUDA torch was not overwritten by CPU version
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA support: {torch.version.cuda}')"
 
-# Copy app code
-COPY app.py .
-
-# Copy start script
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
+# Copy app code + start script (always last — never cached)
+COPY app.py start.sh ./
+RUN chmod +x start.sh
 
 EXPOSE 10000 22
 
-CMD ["/start.sh"]
+CMD ["/app/start.sh"]

@@ -1621,12 +1621,14 @@ def run_molecular_dynamics():
     import traceback
     import numpy as np
 
+    t_start = time()
     data = request.json
     atoms_data = data.get("atoms", [])
     temperature_K = data.get("temperature", 300)
     timestep_fs = data.get("timestep", 1.0)
     friction = data.get("friction", 0.01)
     include_forces = data.get("includeForces", True)
+    print(f"MD request: {len(atoms_data)} atoms, model={data.get('model')}, frames={data.get('frames')}, steps={data.get('steps')}", flush=True)
 
     requested_frames = data.get("frames")
     if requested_frames and requested_frames >= 2:
@@ -1727,10 +1729,11 @@ def run_molecular_dynamics():
             result["forces"] = forces.tolist()
             result["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
 
+        print(f"MD complete: {len(trajectory_frames)} frames in {time() - t_start:.1f}s", flush=True)
         return jsonify(result)
 
     except Exception as e:
-        print(f"❌ MACE MD Error: {str(e)}")
+        print(f"❌ MACE MD Error after {time() - t_start:.1f}s: {str(e)}", flush=True)
         traceback.print_exc()
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
@@ -3161,21 +3164,26 @@ def remote_status():
 print(
     f"Torch device: {TORCH_DEVICE} | MACE device: {MACE_DEVICE} | MACE dtype: {MACE_DTYPE} | Orbital tensors: {TORCH_DEVICE}"
 )
-try:
-    if TORCH_DEVICE == "cuda":
-        print(
-            f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB"
-        )
-except Exception as e:
-    print(f"CUDA info unavailable: {e}")
-# Eagerly check DFT GPU support at startup
-try:
-    get_dft_rks()
-except Exception as e:
-    print(f"DFT GPU check failed: {e}")
-# Warmup MACE — preload model + JIT-compile GPU kernels (eliminates cold-start lag)
-warmup_mace()
 # ============================================================================
+
+
+def _startup():
+    """Run once when the app starts serving (safe for CUDA — runs in worker, not master)."""
+    try:
+        if TORCH_DEVICE == "cuda":
+            print(f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+    except Exception as e:
+        print(f"CUDA info unavailable: {e}")
+    try:
+        get_dft_rks()
+    except Exception as e:
+        print(f"DFT GPU check failed: {e}")
+    warmup_mace()
+
+
+# Run startup in worker context (gunicorn calls this after fork, flask dev runs it directly)
+_startup()
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
