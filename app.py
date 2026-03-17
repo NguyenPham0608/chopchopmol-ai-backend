@@ -908,7 +908,8 @@ def chat_stream():
     thinking_budget = int(data.get("thinkingBudget", 4096))
 
     print(
-        f"📥 Request received: {len(user_message)} chars, state: {len(str(state))} chars",
+        f"📥 Request received: session={session_id[:8]}, msg={len(user_message)} chars, "
+        f"state={len(str(state))} chars, toolResults={'yes' if tool_results else 'no'}",
         flush=True,
     )
 
@@ -924,12 +925,30 @@ def chat_stream():
         for sid in expired:
             del sessions[sid]
 
-    if session_id not in sessions:
+    session_is_new = session_id not in sessions
+    if session_is_new:
         sessions[session_id] = {"history": [], "last_access": now}
     else:
         sessions[session_id]["last_access"] = now
 
     conversationHistory = sessions[session_id]["history"]
+
+    # Detect session loss: tool results arriving for a brand-new (empty) session
+    # means the server restarted and lost in-memory sessions during tool execution.
+    # Recover by injecting the user's original message + the assistant's tool call message
+    # (frontend sends assistantMessage in toolResults payload).
+    if tool_results is not None and session_is_new:
+        print(
+            f"⚠️ Session lost! Tool results arrived for new session {session_id[:8]}. "
+            f"Recovering context.",
+            flush=True,
+        )
+        if user_message:
+            conversationHistory.append({"role": "user", "content": user_message})
+        # Reconstruct the assistant message that made the tool calls
+        assistant_msg_from_frontend = tool_results.get("assistantMessage")
+        if assistant_msg_from_frontend:
+            conversationHistory.append(assistant_msg_from_frontend)
 
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
@@ -1338,24 +1357,26 @@ def chat_stream():
             )
 
             # Post-stream processing (shared)
-            if tool_calls_data:
-                tool_calls = []
-                for tc in tool_calls_data.values():
-                    if tc.get("id") and tc.get("name"):
-                        tool_calls.append(
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": tc["arguments"],
-                                },
-                            }
-                        )
+            # Build tool_calls list from content blocks that have id+name
+            # (thinking/text blocks in tool_calls_data do NOT count as tool calls)
+            tool_calls = []
+            for tc in tool_calls_data.values():
+                if tc.get("id") and tc.get("name"):
+                    tool_calls.append(
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                    )
+            if tool_calls:
                 assistant_msg = {
                     "role": "assistant",
                     "content": collected_content,
-                    "tool_calls": tool_calls,  # Adapted to OpenAI-style for history
+                    "tool_calls": tool_calls,
                 }
                 # Preserve thinking blocks for Claude history reconstruction
                 if collected_thinking_blocks:
