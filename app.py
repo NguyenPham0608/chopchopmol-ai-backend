@@ -766,14 +766,12 @@ EXECUTE_PYTHON — auto-injected variables (no need to call other tools first):
 - Do NOT call get_molecule_info or get_cached_energies before execute_python — the data is already injected.
 - Write the code correctly the first time. Check the variable docs above — energies is a numpy array, not a list of dicts.
 
-TRAINING DATA GENERATION (when user says "generate training data", "make training data", or similar):
-You MUST follow ALL steps in order. Do NOT skip any step.
-Step 1: ASK user: How many frames? Which MACE model? DFT basis set and functional (xc)? Charge and spin?
-Step 2: run_md — generate trajectory frames via MACE MD. Wait for result.
-Step 3: calculate_all_dft_energies — THIS STEP IS MANDATORY. You MUST call this BEFORE saving. It computes DFT energies+forces for every frame, replacing the MACE values.
-Step 4: save_file(filename="training_data_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true)
-Step 5: Tell user how many frames were saved with DFT energies.
-CRITICAL: You MUST call calculate_all_dft_energies between run_md and save_file. NEVER skip it. The whole point is DFT labels, not MACE.
+TRAINING DATA GENERATION (when user says "generate training data", "make training data", "fastest settings", or similar):
+This workflow has exactly 3 tool calls. Do NOT skip any. "Fast" or "fastest" means use def2-svp basis and small MACE model — it does NOT mean skip DFT.
+Step 1: ASK user for: number of frames, MACE model, DFT basis+xc, charge, spin. If user says "fast"/"fastest"/"decide yourself", use: MACE small, basis=def2-svp, xc=wb97m-d3bj, charge=0, spin=0.
+Step 2: run_md(model=..., frames=N) — generate diverse geometries via MACE MD.
+Step 3: calculate_all_dft_energies(basis=..., xc=...) — compute DFT energies+forces for EVERY frame. This is the ENTIRE POINT. Training data = DFT labels on MACE-sampled geometries. NEVER SKIP THIS.
+Step 4: save_file(filename="training_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true) — saves frames with DFT energies+forces.
 
 RULES:
 1. Atom indices: 0-based.
