@@ -1718,10 +1718,12 @@ def run_molecular_dynamics():
             friction=friction / units.fs,
         )
 
-        # Attach observer and run — ASE fires at step 0 (initial frame)
-        # then at save_interval, 2*save_interval, etc.
         dyn.attach(observer, interval=save_interval)
         dyn.run(n_steps)
+
+        # Trim to exact requested count (ASE observer firing varies by version)
+        if requested_frames and len(trajectory_frames) > requested_frames:
+            trajectory_frames = trajectory_frames[:requested_frames]
 
         # Final state
         final_positions = atoms.get_positions().tolist()
