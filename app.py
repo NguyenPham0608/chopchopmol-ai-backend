@@ -2022,7 +2022,12 @@ def calculate_dft_energy_endpoint():
 
 @app.route("/ai/dft/energy-batch", methods=["POST"])
 def calculate_dft_energy_batch_endpoint():
-    """Batch DFT energy for multiple frames using PySCF"""
+    """Batch DFT energy for multiple frames using PySCF.
+    Reuses MO coefficients from the previous frame as initial guess (huge speedup
+    for MD trajectories where geometries are similar frame-to-frame).
+    """
+    import pyscf
+
     data = request.json
     frames_data = data.get("frames", [])
 
@@ -2037,23 +2042,82 @@ def calculate_dft_energy_batch_endpoint():
     conv_tol = data.get("conv_tol", 1e-10)
 
     try:
+        from time import time as _t
+
+        t_batch = _t()
+        gpu_rks = get_dft_rks()
+        if gpu_rks is not None:
+            rks_mod = gpu_rks
+        else:
+            from pyscf.dft import rks as cpu_rks
+            rks_mod = cpu_rks
+
         results = []
+        prev_dm = None  # reuse density matrix across similar frames
+        prev_symbols = None
+        mol = None
+
         for i, atoms_data in enumerate(frames_data):
-            frame_result = compute_dft_energy(
-                atoms_data,
-                basis=basis,
-                xc=xc,
-                charge=charge,
-                spin=spin,
-                include_forces=include_forces,
-                conv_tol=conv_tol,
-            )
-            frame_result["frame"] = i
+            t0 = _t()
+            symbols = [a["element"] for a in atoms_data]
+            coords = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
+
+            # Same molecule composition — just update coordinates
+            if symbols == prev_symbols and mol is not None:
+                mol.set_geom_(coords, unit="Angstrom")
+            else:
+                # Different molecule — rebuild from scratch, reset warm-start
+                atom_list = [(a["element"], (a["x"], a["y"], a["z"])) for a in atoms_data]
+                mol = pyscf.M(atom=atom_list, basis=basis, charge=charge, spin=spin, verbose=0)
+                prev_dm = None
+                prev_symbols = symbols
+
+            mf = rks_mod.RKS(mol, xc=xc).density_fit()
+            mf.conv_tol = conv_tol
+            mf.grids.atom_grid = (99, 590)
+
+            # Warm-start SCF from previous frame's density matrix (same molecule only)
+            if prev_dm is not None:
+                mf.kernel(dm0=prev_dm)
+            else:
+                mf.kernel()
+
+            prev_dm = mf.make_rdm1()
+
+            energy_hartree = float(mf.e_tot)
+            frame_result = {
+                "frame": i,
+                "energy_hartree": energy_hartree,
+                "energy_eV": round(energy_hartree * HARTREE_TO_EV, 6),
+                "energy_kcal": round(energy_hartree * HARTREE_TO_EV * 23.0609, 4),
+                "basis": basis,
+                "xc": xc,
+                "gpu": gpu_rks is not None,
+            }
+
+            if include_forces:
+                g = mf.nuc_grad_method()
+                gradient = np.asarray(g.kernel())
+                forces_ev_ang = -gradient * HARTREE_TO_EV / BOHR_TO_ANG
+                frame_result["forces"] = forces_ev_ang.tolist()
+                frame_result["max_force_eV_A"] = round(
+                    float(np.max(np.linalg.norm(forces_ev_ang, axis=1))), 6
+                )
+
             results.append(frame_result)
+            print(
+                f"  DFT frame {i}/{len(frames_data)}: {_t() - t0:.1f}s",
+                flush=True,
+            )
 
         energies = [r["energy_eV"] for r in results]
         min_idx = int(np.argmin(energies))
         max_idx = int(np.argmax(energies))
+
+        print(
+            f"DFT batch done: {len(results)} frames in {_t() - t_batch:.1f}s",
+            flush=True,
+        )
 
         return jsonify(
             {
