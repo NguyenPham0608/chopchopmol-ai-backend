@@ -1718,11 +1718,8 @@ def run_molecular_dynamics():
             friction=friction / units.fs,
         )
 
-        # Capture initial frame before dynamics starts
-        observer()
-
-        # Attach observer and run — interval=save_interval fires at steps
-        # save_interval, 2*save_interval, etc. (NOT step 0, so no duplicate)
+        # Attach observer and run — ASE fires at step 0 (initial frame)
+        # then at save_interval, 2*save_interval, etc.
         dyn.attach(observer, interval=save_interval)
         dyn.run(n_steps)
 
@@ -2049,6 +2046,7 @@ def calculate_dft_energy_batch_endpoint():
             rks_mod = gpu_rks
         else:
             from pyscf.dft import rks as cpu_rks
+
             rks_mod = cpu_rks
 
         results = []
@@ -2066,8 +2064,12 @@ def calculate_dft_energy_batch_endpoint():
                 mol.set_geom_(coords, unit="Angstrom")
             else:
                 # Different molecule — rebuild from scratch, reset warm-start
-                atom_list = [(a["element"], (a["x"], a["y"], a["z"])) for a in atoms_data]
-                mol = pyscf.M(atom=atom_list, basis=basis, charge=charge, spin=spin, verbose=0)
+                atom_list = [
+                    (a["element"], (a["x"], a["y"], a["z"])) for a in atoms_data
+                ]
+                mol = pyscf.M(
+                    atom=atom_list, basis=basis, charge=charge, spin=spin, verbose=0
+                )
                 prev_dm = None
                 prev_symbols = symbols
 
