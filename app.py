@@ -1718,13 +1718,12 @@ def run_molecular_dynamics():
             friction=friction / units.fs,
         )
 
-        # Attach observer
-        dyn.attach(observer, interval=save_interval)
-
-        # Capture initial frame
+        # Capture initial frame before dynamics starts
         observer()
 
-        # Run MD
+        # Attach observer and run — interval=save_interval fires at steps
+        # save_interval, 2*save_interval, etc. (NOT step 0, so no duplicate)
+        dyn.attach(observer, interval=save_interval)
         dyn.run(n_steps)
 
         # Final state
