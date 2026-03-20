@@ -1653,15 +1653,12 @@ def run_molecular_dynamics():
     )
 
     requested_frames = data.get("frames")
-    if requested_frames and requested_frames >= 2:
-        save_interval = data.get("saveInterval", 10)
-        n_steps = (requested_frames - 1) * save_interval
-    elif requested_frames == 1:
-        save_interval = 1
-        n_steps = 0
+    save_interval = data.get("saveInterval", 10)
+    if requested_frames and requested_frames >= 1:
+        n_steps = requested_frames * save_interval
     else:
         n_steps = data.get("steps", 500)
-        save_interval = data.get("saveInterval", 10)
+        requested_frames = n_steps // save_interval
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
@@ -1683,13 +1680,22 @@ def run_molecular_dynamics():
 
         MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
 
+        # Set up Langevin dynamics (NVT)
+        dyn = Langevin(
+            atoms,
+            timestep=timestep_fs * units.fs,
+            temperature_K=temperature_K,
+            friction=friction / units.fs,
+        )
+
         # Store trajectory frames
         trajectory_frames = []
 
         def observer():
-            """Capture frame at each save interval"""
+            """Capture frame at each save interval, skip initial state (step 0)"""
+            if dyn.nsteps == 0:
+                return  # Skip pre-dynamics initial state
             pos = atoms.get_positions().copy()
-            vel = atoms.get_velocities()
             energy = float(atoms.get_potential_energy())
             kinetic = float(atoms.get_kinetic_energy())
             temp = float(kinetic / (1.5 * len(atoms) * units.kB))
@@ -1700,7 +1706,7 @@ def run_molecular_dynamics():
                 "kinetic_eV": kinetic,
                 "total_eV": energy + kinetic,
                 "temperature_K": temp,
-                "step": len(trajectory_frames) * save_interval,
+                "step": dyn.nsteps,
             }
 
             if include_forces:
@@ -1710,20 +1716,12 @@ def run_molecular_dynamics():
 
             trajectory_frames.append(frame_data)
 
-        # Set up Langevin dynamics (NVT)
-        dyn = Langevin(
-            atoms,
-            timestep=timestep_fs * units.fs,
-            temperature_K=temperature_K,
-            friction=friction / units.fs,
-        )
-
         dyn.attach(observer, interval=save_interval)
         dyn.run(n_steps)
 
-        # Trim to exact requested count (ASE observer firing varies by version)
+        # Trim to exact requested count (safety net for ASE version differences)
         if requested_frames and len(trajectory_frames) > requested_frames:
-            trajectory_frames = trajectory_frames[:requested_frames]
+            trajectory_frames = trajectory_frames[-requested_frames:]
 
         # Final state
         final_positions = atoms.get_positions().tolist()
@@ -1785,11 +1783,8 @@ def run_md_stream():
     requested_frames = data.get("frames")
     save_interval = data.get("saveInterval", 10)
 
-    if requested_frames and requested_frames >= 2:
-        n_steps = (requested_frames - 1) * save_interval
-    elif requested_frames == 1:
-        save_interval = 1
-        n_steps = 0
+    if requested_frames and requested_frames >= 1:
+        n_steps = requested_frames * save_interval
     else:
         n_steps = data.get("steps", 500)
 
@@ -1816,7 +1811,16 @@ def run_md_stream():
 
             frame_index = [0]
 
+            dyn = Langevin(
+                atoms,
+                timestep=timestep_fs * units.fs,
+                temperature_K=temperature_K,
+                friction=friction / units.fs,
+            )
+
             def observer():
+                if dyn.nsteps == 0:
+                    return  # Skip pre-dynamics initial state
                 pos = atoms.get_positions().copy()
                 energy = float(atoms.get_potential_energy())
                 kinetic = float(atoms.get_kinetic_energy())
@@ -1829,7 +1833,7 @@ def run_md_stream():
                     "kinetic_eV": kinetic,
                     "total_eV": energy + kinetic,
                     "temperature_K": temp,
-                    "step": frame_index[0] * save_interval,
+                    "step": dyn.nsteps,
                 }
                 if include_forces:
                     forces = atoms.get_forces()
@@ -1838,14 +1842,7 @@ def run_md_stream():
                 q.put(frame)
                 frame_index[0] += 1
 
-            dyn = Langevin(
-                atoms,
-                timestep=timestep_fs * units.fs,
-                temperature_K=temperature_K,
-                friction=friction / units.fs,
-            )
             dyn.attach(observer, interval=save_interval)
-            observer()  # initial frame
             dyn.run(n_steps)
 
             final_energy = float(atoms.get_potential_energy())
