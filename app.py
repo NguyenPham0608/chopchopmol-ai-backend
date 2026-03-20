@@ -771,7 +771,7 @@ This workflow has exactly 3 tool calls. Do NOT skip any. "Fast" or "fastest" mea
 Step 1: ASK user for: number of frames, MACE model, DFT basis+xc, charge, spin. If user says "fast"/"fastest"/"decide yourself", use: MACE small, basis=def2-svp, xc=wb97m-d3bj, charge=0, spin=0.
 Step 2: run_md(model=..., frames=N) — generate diverse geometries via MACE MD.
 Step 3: calculate_all_dft_energies(basis=..., xc=...) — compute DFT energies+forces for EVERY frame. This is the ENTIRE POINT. Training data = DFT labels on MACE-sampled geometries. NEVER SKIP THIS.
-Step 4: save_file(filename="training_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true) — saves frames with DFT energies+forces.
+Step 4: save_file(filename="training_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true) — saves frames with DFT energies+forces. Use pbc as T T T rather than F F F.
 
 RULES:
 1. Atom indices: 0-based.
