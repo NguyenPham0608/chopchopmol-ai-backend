@@ -61,7 +61,7 @@ with open('cafein_out.extxyz', 'w') as fout:
         fout.write(f'{natoms}\n')
         fout.write(
             f'Properties="species:S:1:pos:R:3:forces:R:3" '
-            f'energy={energy:.10f} charge={mol.charge} spin={mol.spin} pbc="F F F"\n'
+            f'energy={energy:.10f} charge={mol.charge} spin={mol.spin} pbc="T T T"\n'
         )
         for i, (sym, (x, y, z)) in enumerate(atoms):
             fx, fy, fz = forces[i]
