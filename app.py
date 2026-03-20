@@ -230,7 +230,7 @@ def _calculate_energy_batch_native(frames_data, model_id, include_forces):
         config = mace_utils.Configuration(
             atomic_numbers=np.array([ase_atomic_numbers[s] for s in symbols]),
             positions=positions,
-            pbc=np.array([False, False, False]),
+            pbc=np.array([True, True, True]),
         )
         atomic_data = mace_utils.AtomicData.from_config(
             config, z_table=z_table, cutoff=r_max
@@ -285,7 +285,7 @@ def warmup_mace():
     models_to_warm = ["mace-mp-0a", "small", "medium"]
     try:
         test_atoms = Atoms(
-            "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=False
+            "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True
         )
         for model_id in models_to_warm:
             t1 = time()
@@ -782,6 +782,7 @@ RULES:
 6. Brief responses (1-2 sentences). Execute tools immediately. Minimize tool calls — do as much as possible in a single execute_python call.
 7. Measurement tools accept atom indices directly — no need to select first.
 8. For unknown chemistry facts, use web_search. For known facts, answer directly.
+
 """
 
 
@@ -1501,7 +1502,7 @@ def optimize_geometry():
         )
         cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
-        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=True)
 
         model_name = data.get("model", "medium")
         atoms.calc = get_mace_calculator(model_name)
@@ -1673,7 +1674,7 @@ def run_molecular_dynamics():
         )
         cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
-        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=False)
+        atoms = Atoms(symbols=symbols, positions=positions, cell=cell_size, pbc=True)
 
         model_name = data.get("model", "medium")
         atoms.calc = get_mace_calculator(model_name)
@@ -1804,7 +1805,7 @@ def run_md_stream():
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
             atoms = Atoms(
-                symbols=symbols, positions=positions, cell=cell_size, pbc=False
+                symbols=symbols, positions=positions, cell=cell_size, pbc=True
             )
             atoms.calc = calc
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K)
@@ -1916,7 +1917,7 @@ def optimize_geometry_stream():
             cell_size = np.maximum(pos_max - pos_min + 20.0, 30.0)
 
             atoms = Atoms(
-                symbols=symbols, positions=positions, cell=cell_size, pbc=False
+                symbols=symbols, positions=positions, cell=cell_size, pbc=True
             )
             atoms.calc = calc
 
