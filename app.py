@@ -2117,11 +2117,11 @@ def mace_finetune():
 
     def worker():
         try:
-            # Free cached CUDA memory before spawning training subprocess
-            if MACE_DEVICE == "cuda":
-                torch.cuda.empty_cache()
+            # Ensure clean CUDA context for the child process
             env = os.environ.copy()
             env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+            # Force the child to re-initialize CUDA from scratch
+            env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0")
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -2129,6 +2129,7 @@ def mace_finetune():
                 text=True,
                 bufsize=1,
                 env=env,
+                start_new_session=True,
             )
             # Regex to parse MACE training output lines
             epoch_re = _re.compile(
