@@ -112,6 +112,10 @@ def get_dft_rks():
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
 
+# Registry of user fine-tuned models: {model_name: model_path}
+_finetuned_models = {}
+FINETUNE_DIR = os.environ.get("MACE_FINETUNE_DIR", "/tmp/mace_finetuned")
+
 MACE_MODELS = {
     "mace-mp-0a": {
         "url": "medium",
@@ -138,11 +142,20 @@ MACE_MODELS = {
 
 
 def get_mace_calculator(model_id="mace-mp-0a"):
-    """Get a cached MACE calculator. Accepts energy model IDs (mace-mp-0a, etc.)
-    and optimizer/MD model names (small, medium, large)."""
+    """Get a cached MACE calculator. Accepts energy model IDs (mace-mp-0a, etc.),
+    optimizer/MD model names (small, medium, large), and fine-tuned model names."""
     global _mace_calculators
     if model_id not in _mace_calculators:
-        from mace.calculators import mace_mp
+        from mace.calculators import mace_mp, MACECalculator
+
+        # Check fine-tuned models first
+        if model_id in _finetuned_models:
+            _mace_calculators[model_id] = MACECalculator(
+                model_paths=_finetuned_models[model_id],
+                default_dtype=MACE_DTYPE,
+                device=MACE_DEVICE,
+            )
+            return _mace_calculators[model_id]
 
         # Map optimizer/MD names to mace_mp model args
         model_map = {
@@ -161,6 +174,26 @@ def get_mace_calculator(model_id="mace-mp-0a"):
             model=model_url, default_dtype=MACE_DTYPE, device=MACE_DEVICE
         )
     return _mace_calculators[model_id]
+
+
+def get_foundation_model_path(model_id):
+    """Get the file path of a foundation MACE model for fine-tuning."""
+    from mace.calculators.foundations_models import download_mace_mp_checkpoint
+
+    # Map model IDs to the names that download_mace_mp_checkpoint expects
+    model_map = {
+        "mace-mp-0a": "medium",
+        "mace-mp-0b3": MACE_MODELS["mace-mp-0b3"]["url"],
+        "mace-mpa-0": MACE_MODELS["mace-mpa-0"]["url"],
+        "small": "small",
+        "medium": "medium",
+        "large": "large",
+    }
+    download_key = model_map.get(model_id, model_id)
+    path = download_mace_mp_checkpoint(download_key)
+    if not os.path.exists(path):
+        raise ValueError(f"Model file not found at {path}")
+    return str(path)
 
 
 def compute_dft_energy(
@@ -602,12 +635,12 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"rotational_scan","description":"Torsion scan: generate frames by rotating fragment around axis. Returns frameCount. Auto-picks smaller fragment. Not for rings. Follow with calculate_all_energies then create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First axis atom (0-based)"},"axisAtom2":{"type":"integer","description":"Second axis atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Override: atoms to rotate. If omitted, auto-picks smaller fragment."},"increment":{"type":"number","description":"Step size in degrees (default: 10)"},"startAngle":{"type":"number","description":"Start angle (default: 0)"},"endAngle":{"type":"number","description":"End angle (default: 360)"}},"required":["axisAtom1","axisAtom2"]}}},
   {"type":"function","function":{"name":"translation_scan","description":"Dissociation scan: translate fragment along axis in distance increments. Returns frameCount. Follow with calculate_all_energies then create_chart.","parameters":{"type":"object","properties":{"axisAtom1":{"type":"integer","description":"First axis atom (0-based)"},"axisAtom2":{"type":"integer","description":"Second axis atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Atoms to translate (0-based)"},"startDistance":{"type":"number","description":"Start distance in Angstroms (default: 0)"},"endDistance":{"type":"number","description":"End distance (default: 3)"},"increment":{"type":"number","description":"Step size in Angstroms (default: 0.2)"}},"required":["axisAtom1","axisAtom2","atomsToMove"]}}},
   {"type":"function","function":{"name":"angle_scan","description":"Angle scan: rotate fragment through angle range around pivot atom2 (A-B-C). Returns frameCount. Follow with calculate_all_energies then create_chart.","parameters":{"type":"object","properties":{"atom1":{"type":"integer","description":"First atom (0-based)"},"atom2":{"type":"integer","description":"Pivot atom (0-based)"},"atom3":{"type":"integer","description":"Third atom (0-based)"},"atomsToMove":{"type":"array","items":{"type":"integer"},"description":"Atoms to rotate (0-based)"},"increment":{"type":"number","description":"Step degrees (default: 10)"},"startAngle":{"type":"number","description":"Start (default: 0)"},"endAngle":{"type":"number","description":"End (default: 360)"}},"required":["atom1","atom2","atom3"]}}},
-  {"type":"function","function":{"name":"calculate_energy","description":"Single-point MACE energy for current geometry. Returns energy_eV and per-atom forces by default (needed for toggle_force_arrows). Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"MACE model"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"calculate_all_energies","description":"Batch MACE energy for all frames. Returns energies array with scanXValues for charting. Required after any scan. Follow with create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"mace-mp-0a (fast), mace-mp-0b3 (high-P), mace-mpa-0 (accurate)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_energy","description":"Single-point MACE energy for current geometry. Returns energy_eV and per-atom forces by default (needed for toggle_force_arrows). Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","description":"MACE model: mace-mp-0a (fast), mace-mp-0b3 (high-P), mace-mpa-0 (accurate), or a fine-tuned model name from finetune_model."},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"calculate_all_energies","description":"Batch MACE energy for all frames. Returns energies array with scanXValues for charting. Required after any scan. Follow with create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","description":"MACE model: mace-mp-0a (fast), mace-mp-0b3 (high-P), mace-mpa-0 (accurate), or a fine-tuned model name from finetune_model."},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"calculate_dft_energy","description":"Single-point DFT energy using PySCF (GPU-accelerated). IMPORTANT: You MUST ask the user for basis and xc before calling, unless they said 'decide yourself' or 'fastest' or already specified them.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set — ASK USER. Common: def2-svp (fast), def2-tzvp, def2-tzvppd (accurate), cc-pvdz, cc-pvtz, 6-31g*"},"xc":{"type":"string","description":"DFT functional — ASK USER. Common: b3lyp, pbe, pbe0, wb97x-d, wb97m-d3bj"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin multiplicity minus 1 (default: 0 = singlet, 1 = doublet, 2 = triplet)"},"includeForces":{"type":"boolean","description":"Include per-atom forces via gradient (default: true)"}},"required":["basis","xc"]}}},
   {"type":"function","function":{"name":"calculate_all_dft_energies","description":"Batch DFT energy for all loaded frames using PySCF (GPU-accelerated). IMPORTANT: You MUST ask the user for basis and xc before calling, unless they said 'decide yourself' or 'fastest' or already specified them.","parameters":{"type":"object","properties":{"basis":{"type":"string","description":"Basis set — ASK USER. Common: def2-svp (fast), def2-tzvp, def2-tzvppd (accurate), cc-pvdz, cc-pvtz, 6-31g*"},"xc":{"type":"string","description":"DFT functional — ASK USER. Common: b3lyp, pbe, pbe0, wb97x-d, wb97m-d3bj"},"charge":{"type":"integer","description":"Molecular charge (default: 0)"},"spin":{"type":"integer","description":"Spin (default: 0)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["basis","xc"]}}},
-  {"type":"function","function":{"name":"optimize_geometry","description":"MACE geometry optimization. Returns converged, steps, energy_eV, trajectory, and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"small (fast), medium (balanced), large (accurate), mace-mpa-0 (best)"},"fmax":{"type":"number","description":"Force threshold eV/A (default: 0.05)"},"maxSteps":{"type":"integer","description":"Max steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
-  {"type":"function","function":{"name":"run_md","description":"MACE molecular dynamics (Langevin NVT). Returns trajectory frameCount and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model. Use 'frames' to control exact output frame count (preferred over steps/saveInterval).","parameters":{"type":"object","properties":{"model":{"type":"string","enum":["small","medium","large","mace-mpa-0"],"description":"MACE model"},"temperature":{"type":"number","description":"Temp in K (default: 300)"},"frames":{"type":"integer","description":"Exact number of output frames desired. Overrides steps/saveInterval. E.g. frames=10 produces exactly 10 frames."},"steps":{"type":"integer","description":"MD steps (default: 500). Ignored if frames is set."},"timestep":{"type":"number","description":"fs (default: 1.0)"},"friction":{"type":"number","description":"1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save every N steps (default: 10). Ignored if frames is set."},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"optimize_geometry","description":"MACE geometry optimization. Returns converged, steps, energy_eV, trajectory, and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model.","parameters":{"type":"object","properties":{"model":{"type":"string","description":"small (fast), medium (balanced), large (accurate), mace-mpa-0 (best), or a fine-tuned model name from finetune_model."},"fmax":{"type":"number","description":"Force threshold eV/A (default: 0.05)"},"maxSteps":{"type":"integer","description":"Max steps (default: 100)"},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
+  {"type":"function","function":{"name":"run_md","description":"MACE molecular dynamics (Langevin NVT). Returns trajectory frameCount and per-atom forces by default. Follow with get_cached_energies and create_chart. Always specify model. Use 'frames' to control exact output frame count (preferred over steps/saveInterval).","parameters":{"type":"object","properties":{"model":{"type":"string","description":"MACE model: small (fast), medium (balanced), large (accurate), mace-mpa-0 (best), or a fine-tuned model name from finetune_model."},"temperature":{"type":"number","description":"Temp in K (default: 300)"},"frames":{"type":"integer","description":"Exact number of output frames desired. Overrides steps/saveInterval. E.g. frames=10 produces exactly 10 frames."},"steps":{"type":"integer","description":"MD steps (default: 500). Ignored if frames is set."},"timestep":{"type":"number","description":"fs (default: 1.0)"},"friction":{"type":"number","description":"1/fs (default: 0.01)"},"saveInterval":{"type":"integer","description":"Save every N steps (default: 10). Ignored if frames is set."},"includeForces":{"type":"boolean","description":"Include per-atom forces (default: true)"}},"required":["model"]}}},
   {"type":"function","function":{"name":"load_molecule","description":"Load molecule by name from PubChem (e.g. caffeine, aspirin). Follow with get_molecule_info to inspect.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Molecule name"}},"required":["name"]}}},
   {"type":"function","function":{"name":"create_chart","description":"Display line/bar/scatter chart from x and y arrays. Use scanXValues from calculate_all_energies for x-axis. Style params let you customize colors, line width, point size, fill, grid, legend, etc.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["line","bar","scatter"],"description":"Chart type (default: line)"},"title":{"type":"string","description":"Chart title"},"xLabel":{"type":"string","description":"X-axis label"},"yLabel":{"type":"string","description":"Y-axis label"},"x":{"type":"array","items":{"type":"number"},"description":"X values"},"y":{"type":"array","items":{"type":"number"},"description":"Y values"},"labels":{"type":"array","items":{"type":"string"},"description":"Series labels"},"lineColor":{"type":"string","description":"Line/border color as hex or CSS color (default: #667eea)"},"pointColor":{"type":"string","description":"Point fill color (default: same as lineColor)"},"highlightColor":{"type":"string","description":"Color for highlighted/current-frame point (default: #f093fb)"},"backgroundColor":{"type":"string","description":"Chart area background color (default: rgba(0,0,0,0.3))"},"lineWidth":{"type":"number","description":"Line thickness 1-6 (default: 2)"},"pointSize":{"type":"number","description":"Point radius 0-10 (default: 3)"},"tension":{"type":"number","description":"Curve smoothness 0-1 where 0=straight, 1=very smooth (default: 0.3)"},"fill":{"type":"boolean","description":"Fill area under line (default: false)"},"fillColor":{"type":"string","description":"Fill color with opacity e.g. rgba(102,126,234,0.2) (default: auto from lineColor)"},"showGrid":{"type":"boolean","description":"Show grid lines (default: true)"},"showLegend":{"type":"boolean","description":"Show chart legend (default: false)"},"showPoints":{"type":"boolean","description":"Show data points (default: true)"},"fontSize":{"type":"number","description":"Base font size for labels and ticks (default: 12)"},"datasets":{"type":"array","items":{"type":"object","properties":{"y":{"type":"array","items":{"type":"number"},"description":"Y values for this series"},"label":{"type":"string","description":"Series label"},"color":{"type":"string","description":"Line color for this series"}},"required":["y"]},"description":"Multiple data series (overrides y param). Each has y, label, color."}},"required":["x","y"]}}},
   {"type":"function","function":{"name":"save_file","description":"Export molecule to file (xyz, extxyz, mol, pdb, pqr, gro, mol2). Auto-includes forces/energies.","parameters":{"type":"object","properties":{"filename":{"type":"string","description":"Filename (default: auto)"},"format":{"type":"string","enum":["xyz","extxyz","mol","pdb","pqr","gro","mol2"],"description":"Format (default: xyz)"},"allFrames":{"type":"boolean","description":"All frames (default: true)"},"saveToLocal":{"type":"boolean","description":"Save to local folder vs download"}}}}},
@@ -631,7 +664,9 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"isolate_selection","description":"Isolate selected atoms to view/edit separately.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"undo","description":"Undo last action.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"execute_python","description":"Execute Python code. Pre-injected variables (use 'x' in dir() to check availability): atoms = list of dicts [{element, x, y, z}, ...] (current frame, Angstrom). positions = numpy float64 array shape (n_frames, n_atoms, 3) in Angstrom — use for vectorized analysis instead of looping over frames. energies = numpy float64 1D array of potential energies in eV, one per frame — plain number array, NOT dicts. frames = list of dicts [{index, atoms: [{element, x, y, z, fx?, fy?, fz?}]}] — only needed for element labels per frame. steps = numpy int array of MD step numbers (only after MD). temperatures = numpy float64 array of temps in K per frame (only after MD). kinetic_energies = numpy float64 array of kinetic energies eV per frame (only after MD). total_energies = numpy float64 array of total energies (pot+kin) eV per frame (only after MD). Libraries: numpy (np), matplotlib (plt), math. Figures auto-captured. Print results to stdout.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}}
+  {"type":"function","function":{"name":"execute_python","description":"Execute Python code. Pre-injected variables (use 'x' in dir() to check availability): atoms = list of dicts [{element, x, y, z}, ...] (current frame, Angstrom). positions = numpy float64 array shape (n_frames, n_atoms, 3) in Angstrom — use for vectorized analysis instead of looping over frames. energies = numpy float64 1D array of potential energies in eV, one per frame — plain number array, NOT dicts. frames = list of dicts [{index, atoms: [{element, x, y, z, fx?, fy?, fz?}]}] — only needed for element labels per frame. steps = numpy int array of MD step numbers (only after MD). temperatures = numpy float64 array of temps in K per frame (only after MD). kinetic_energies = numpy float64 array of kinetic energies eV per frame (only after MD). total_energies = numpy float64 array of total energies (pot+kin) eV per frame (only after MD). Libraries: numpy (np), matplotlib (plt), math. Figures auto-captured. Print results to stdout.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}},
+  {"type":"function","function":{"name":"finetune_model","description":"Fine-tune a MACE foundation model on the current trajectory frames. Use after generating training data (run_md + calculate_all_dft_energies). Streams epoch-by-epoch loss. Returns model name usable in calculate_energy, optimize_geometry, run_md.","parameters":{"type":"object","properties":{"modelName":{"type":"string","description":"Name for the fine-tuned model (no spaces). E.g. 'caffeine-ft'. Used to reference it in later tools."},"foundationModel":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"Foundation model to fine-tune from."},"epochs":{"type":"integer","description":"Training epochs (default: 100). Use 50-200 for fast fine-tuning."},"batchSize":{"type":"integer","description":"Batch size (default: 4)."},"rMax":{"type":"number","description":"Cutoff radius in Angstroms (default: 4.0)."},"correlation":{"type":"integer","description":"Correlation order (default: 3)."},"validFraction":{"type":"number","description":"Fraction of frames for validation (default: 0.1)."}},"required":["modelName","foundationModel"]}}},
+  {"type":"function","function":{"name":"list_finetuned_models","description":"List all fine-tuned MACE models available in this session. Returns model names usable in calculate_energy, optimize_geometry, run_md.","parameters":{"type":"object","properties":{}}}}
 ]"""
 
 TOOLS = orjson.loads(TOOLS_JSON)
@@ -745,13 +780,13 @@ def build_system_prompt(state, model=""):
 
     return f"""ChopChopMol AI — molecular visualization and computation assistant. Powered by {model_display}.
 
-STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, CachedEnergies={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}, File={state.get('currentFileName') or 'None'}, Folder={str(len(state.get('folderFiles', [])))+' files' if state.get('hasFolder') else 'None'}
+STATE: Atoms={state.get('atomCount', 0) if state.get('hasAtoms') else 0}, Selected={state.get('selectedCount', 0)}{' '+str(state.get('selectedIndices', [])) if state.get('selectedCount', 0) > 0 else ''}, Axis={'atoms '+str(state.get('axisAtoms', [])[0])+'-'+str(state.get('axisAtoms', [])[1]) if state.get('hasAxis') and len(state.get('axisAtoms', [])) == 2 else 'None'}, Frames={state.get('frameCount', 0)}, CachedEnergies={'Y('+str(state.get('maceFrameCount', 0))+')' if state.get('hasMaceCache') else 'N'}, File={state.get('currentFileName') or 'None'}, Folder={str(len(state.get('folderFiles', [])))+' files' if state.get('hasFolder') else 'None'}{', FinetunedModels='+','.join(state.get('finetunedModels', [])) if state.get('finetunedModels') else ''}
 
 TOOL LAYERS (compose bottom-up):
 L1 QUERY: get_molecule_info, get_atom_info, get_bonded_atoms, measure_distance, measure_angle, measure_dihedral, get_cached_energies, web_search, read_file, list_folder_files (read-only, no side effects)
 L2 SELECT: select_atoms, select_atoms_by_element, select_all_atoms, select_connected, clear_selection (set context for L3)
 L3 EDIT: add_atom, remove_atoms, change_atom_element, set_bond_distance, set_angle, set_dihedral_angle, transform_atoms, split_molecule (modify molecule, most require selection)
-L4 GENERATE: rotational_scan, translation_scan, angle_scan, calculate_energy, calculate_all_energies, calculate_dft_energy, calculate_all_dft_energies, optimize_geometry, run_md, load_molecule (create frames/data)
+L4 GENERATE: rotational_scan, translation_scan, angle_scan, calculate_energy, calculate_all_energies, calculate_dft_energy, calculate_all_dft_energies, optimize_geometry, run_md, finetune_model, list_finetuned_models, load_molecule (create frames/data)
 L5 OUTPUT: create_chart, save_file, save_image, create_file, edit_file (present results)
 L6 VIEW: toggle_labels, toggle_force_arrows, toggle_charge_visualization, set_style, camera, undo, redo (non-destructive)
 
@@ -772,6 +807,12 @@ Step 1: ASK user for: number of frames, MACE model, DFT basis+xc, charge, spin. 
 Step 2: run_md(model=..., frames=N) — generate diverse geometries via MACE MD.
 Step 3: calculate_all_dft_energies(basis=..., xc=...) — compute DFT energies+forces for EVERY frame. This is the ENTIRE POINT. Training data = DFT labels on MACE-sampled geometries. NEVER SKIP THIS.
 Step 4: save_file(filename="training_MOLECULE_XC_BASIS.extxyz", format="extxyz", allFrames=true, saveToLocal=true) — saves frames with DFT energies+forces. Use pbc as T T T rather than F F F.
+
+FINE-TUNING WORKFLOW (when user says "fine-tune", "train model", "custom model"):
+1. Generate training data first: run_md → calculate_all_dft_energies (or load existing ExtXYZ with energies+forces)
+2. finetune_model(modelName="my-model", foundationModel="mace-mp-0a", epochs=100) — streams epoch progress
+3. Use fine-tuned model: calculate_energy(model="my-model"), optimize_geometry(model="my-model"), run_md(model="my-model")
+NOTE: Fine-tuned model names are arbitrary strings chosen by user/AI, NOT from the standard enum list.{f' Available fine-tuned models: {", ".join(_finetuned_models.keys())}' if _finetuned_models else ''}
 
 RULES:
 1. Atom indices: 0-based.
@@ -1982,6 +2023,209 @@ def optimize_geometry_stream():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── MACE Fine-Tuning Endpoints ─────────────────────────────────────────────
+
+
+@app.route("/ai/mace/finetune", methods=["POST"])
+def mace_finetune():
+    """Fine-tune a MACE foundation model on user training data. Streams SSE progress."""
+    import queue
+    import threading
+    import subprocess
+    import sys
+    import re as _re
+    import glob as _glob
+
+    data = request.json
+    extxyz = data.get("extxyz", "")
+    model_name = data.get("modelName", "")
+    foundation_model_id = data.get("foundationModel", "mace-mp-0a")
+    epochs = data.get("epochs", 100)
+    batch_size = data.get("batchSize", 4)
+    r_max = data.get("rMax", 4.0)
+    correlation = data.get("correlation", 3)
+    valid_fraction = data.get("validFraction", 0.1)
+    hidden_irreps = data.get("hiddenIrreps", "128x0e + 128x1o")
+    num_interactions = data.get("numInteractions", 2)
+
+    if not extxyz:
+        return jsonify({"error": "No training data (extxyz) provided"}), 400
+    if not model_name or " " in model_name:
+        return jsonify({"error": "modelName required (no spaces)"}), 400
+
+    # Resolve foundation model path
+    try:
+        foundation_path = get_foundation_model_path(foundation_model_id)
+    except Exception as e:
+        return jsonify({"error": f"Cannot resolve foundation model: {e}"}), 400
+
+    # Locate MACE training script
+    try:
+        import mace as _mace_pkg
+
+        mace_train_script = os.path.join(
+            os.path.dirname(_mace_pkg.__file__), "cli", "run_train.py"
+        )
+        if not os.path.exists(mace_train_script):
+            # Fallback to scripts/ directory (older MACE versions)
+            mace_train_script = os.path.join(
+                os.path.dirname(_mace_pkg.__file__), "scripts", "run_train.py"
+            )
+        if not os.path.exists(mace_train_script):
+            return jsonify({"error": "MACE run_train.py not found"}), 500
+    except ImportError:
+        return jsonify({"error": "MACE package not installed"}), 500
+
+    # Write training data to file
+    os.makedirs(FINETUNE_DIR, exist_ok=True)
+    train_path = os.path.join(FINETUNE_DIR, f"train_{model_name}.extxyz")
+    with open(train_path, "w") as f:
+        f.write(extxyz)
+
+    # Build subprocess command
+    cmd = [
+        sys.executable,
+        mace_train_script,
+        f"--name={model_name}",
+        f"--train_file={train_path}",
+        f"--valid_fraction={valid_fraction}",
+        f"--energy_key=energy",
+        f"--forces_key=forces",
+        f"--E0s=average",
+        f"--model=MACE",
+        f"--hidden_irreps={hidden_irreps}",
+        f"--r_max={r_max}",
+        f"--num_interactions={num_interactions}",
+        f"--batch_size={batch_size}",
+        f"--max_num_epochs={epochs}",
+        "--ema",
+        "--ema_decay=0.99",
+        "--amsgrad",
+        "--restart_latest",
+        f"--device={MACE_DEVICE}",
+        "--default_dtype=float64",
+        f"--foundation_model={foundation_path}",
+        f"--correlation={correlation}",
+        f"--checkpoints_dir={FINETUNE_DIR}",
+        f"--results_dir={FINETUNE_DIR}",
+        f"--work_dir={FINETUNE_DIR}",
+    ]
+
+    q = queue.Queue()
+
+    def worker():
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            # Regex to parse MACE training output lines
+            epoch_re = _re.compile(
+                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+).*?val[_ ]?loss[=:]\s*([0-9.eE+\-]+)",
+                _re.IGNORECASE,
+            )
+            epoch_re2 = _re.compile(
+                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", _re.IGNORECASE
+            )
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                m = epoch_re.search(line)
+                if m:
+                    q.put(
+                        {
+                            "type": "progress",
+                            "epoch": int(m.group(1)),
+                            "loss": float(m.group(2)),
+                            "valLoss": float(m.group(3)),
+                        }
+                    )
+                else:
+                    m2 = epoch_re2.search(line)
+                    if m2:
+                        q.put(
+                            {
+                                "type": "progress",
+                                "epoch": int(m2.group(1)),
+                                "loss": float(m2.group(2)),
+                                "valLoss": None,
+                            }
+                        )
+                    else:
+                        q.put({"type": "log", "line": line})
+
+            proc.wait()
+            if proc.returncode != 0:
+                q.put(
+                    {
+                        "type": "error",
+                        "error": f"Training failed with exit code {proc.returncode}",
+                    }
+                )
+                return
+
+            # Find output model file — MACE names them {name}_run-{seed}_stagetwo.model
+            candidates = _glob.glob(
+                os.path.join(FINETUNE_DIR, f"{model_name}*stagetwo.model")
+            )
+            if not candidates:
+                candidates = _glob.glob(
+                    os.path.join(FINETUNE_DIR, f"{model_name}*.model")
+                )
+            if not candidates:
+                q.put(
+                    {
+                        "type": "error",
+                        "error": "Training completed but no .model file found",
+                    }
+                )
+                return
+
+            # Pick most recently modified
+            model_path = max(candidates, key=os.path.getmtime)
+            _finetuned_models[model_name] = model_path
+            # Evict from calculator cache so it gets freshly loaded
+            _mace_calculators.pop(model_name, None)
+
+            q.put(
+                {
+                    "type": "done",
+                    "modelName": model_name,
+                    "modelPath": model_path,
+                }
+            )
+        except Exception as e:
+            q.put({"type": "error", "error": str(e)})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                item = q.get(timeout=600)  # 10 min timeout for training
+            except queue.Empty:
+                yield f"data: {dumps({'type': 'error', 'error': 'Training timed out'})}\n\n"
+                break
+            yield f"data: {dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/ai/mace/finetune/models", methods=["GET"])
+def list_finetuned_models_endpoint():
+    """List all registered fine-tuned models."""
+    return jsonify({"models": _finetuned_models})
 
 
 # ── DFT (PySCF) Endpoints ──────────────────────────────────────────────────
@@ -3257,6 +3501,22 @@ print(
 # ============================================================================
 
 
+def _scan_finetuned_models():
+    """Re-register any .model files from a previous session in FINETUNE_DIR."""
+    import glob as _glob
+
+    if not os.path.exists(FINETUNE_DIR):
+        return
+    for path in _glob.glob(os.path.join(FINETUNE_DIR, "*.model")):
+        name = os.path.basename(path).replace(".model", "")
+        # Strip MACE's training suffixes like _run-123_stagetwo
+        if "_run-" in name:
+            name = name.rsplit("_run-", 1)[0]
+        if name not in _finetuned_models:
+            _finetuned_models[name] = path
+            print(f"  Re-registered fine-tuned model: {name} from {path}")
+
+
 def _startup():
     """Run once when the app starts serving (safe for CUDA — runs in worker, not master)."""
     try:
@@ -3271,6 +3531,7 @@ def _startup():
     except Exception as e:
         print(f"DFT GPU check failed: {e}")
     warmup_mace()
+    _scan_finetuned_models()
 
 
 # Run startup in worker context (gunicorn calls this after fork, flask dev runs it directly)
