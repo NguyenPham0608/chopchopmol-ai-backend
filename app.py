@@ -2103,11 +2103,11 @@ def mace_finetune():
         "--ema",
         "--ema_decay=0.99",
         "--amsgrad",
-        "--restart_latest",
         f"--device={MACE_DEVICE}",
-        "--default_dtype=float64",
+        f"--default_dtype={'float32' if MACE_DEVICE == 'cuda' else 'float64'}",
         f"--foundation_model={foundation_path}",
         f"--correlation={correlation}",
+        "--seed=42",
         f"--checkpoints_dir={FINETUNE_DIR}",
         f"--results_dir={FINETUNE_DIR}",
         f"--work_dir={FINETUNE_DIR}",
@@ -2117,12 +2117,18 @@ def mace_finetune():
 
     def worker():
         try:
+            # Free cached CUDA memory before spawning training subprocess
+            if MACE_DEVICE == "cuda":
+                torch.cuda.empty_cache()
+            env = os.environ.copy()
+            env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             # Regex to parse MACE training output lines
             epoch_re = _re.compile(
