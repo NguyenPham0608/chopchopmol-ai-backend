@@ -2142,6 +2142,11 @@ def mace_finetune():
             sys.argv = ["mace_run_train"] + argv
             try:
                 mace_train_main()
+            except SystemExit as e:
+                # mace_train_main() calls sys.exit(0) on success
+                if e.code != 0:
+                    q.put({"type": "error", "error": f"Training exited with code {e.code}"})
+                    return
             finally:
                 sys.argv = old_argv
                 mace_logger.removeHandler(handler)
@@ -2164,6 +2169,7 @@ def mace_finetune():
             model_path = max(candidates, key=os.path.getmtime)
             _finetuned_models[model_name] = model_path
             _mace_calculators.pop(model_name, None)
+            print(f"Fine-tuned model registered: {model_name} -> {model_path}")
 
             q.put({
                 "type": "done",
