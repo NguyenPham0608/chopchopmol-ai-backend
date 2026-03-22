@@ -2066,9 +2066,21 @@ def mace_finetune():
     q = queue.Queue()
 
     def worker():
+        import logging
+        import glob as _glob
+        import sys
+        import re as _re
+
+        handler = None
+        old_argv = sys.argv
         try:
-            import logging
-            import glob as _glob
+            print(f"[finetune] Starting: model={model_name}, foundation={foundation_model_id}, epochs={epochs}")
+
+            # Clean up old checkpoints for this model name to avoid conflicts
+            for old_file in _glob.glob(os.path.join(FINETUNE_DIR, f"{model_name}*")):
+                if old_file != train_path:
+                    os.remove(old_file)
+                    print(f"[finetune] Cleaned up old file: {old_file}")
 
             # Build args list matching MACE's CLI parser
             argv = [
@@ -2099,77 +2111,80 @@ def mace_finetune():
 
             # Intercept MACE's logger to capture epoch progress
             mace_logger = logging.getLogger("mace")
-            re_mod = __import__("re")
-            epoch_re = re_mod.compile(
+            epoch_re = _re.compile(
                 r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+).*?val[_ ]?loss[=:]\s*([0-9.eE+\-]+)",
-                re_mod.IGNORECASE,
+                _re.IGNORECASE,
             )
-            epoch_re2 = re_mod.compile(
-                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", re_mod.IGNORECASE
+            epoch_re2 = _re.compile(
+                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", _re.IGNORECASE
             )
 
             class QueueHandler(logging.Handler):
                 def emit(self, record):
-                    msg = self.format(record)
-                    m = epoch_re.search(msg)
-                    if m:
-                        q.put({
-                            "type": "progress",
-                            "epoch": int(m.group(1)),
-                            "loss": float(m.group(2)),
-                            "valLoss": float(m.group(3)),
-                        })
-                    else:
-                        m2 = epoch_re2.search(msg)
-                        if m2:
+                    try:
+                        msg = self.format(record)
+                        m = epoch_re.search(msg)
+                        if m:
                             q.put({
                                 "type": "progress",
-                                "epoch": int(m2.group(1)),
-                                "loss": float(m2.group(2)),
-                                "valLoss": None,
+                                "epoch": int(m.group(1)),
+                                "loss": float(m.group(2)),
+                                "valLoss": float(m.group(3)),
                             })
                         else:
-                            q.put({"type": "log", "line": msg})
+                            m2 = epoch_re2.search(msg)
+                            if m2:
+                                q.put({
+                                    "type": "progress",
+                                    "epoch": int(m2.group(1)),
+                                    "loss": float(m2.group(2)),
+                                    "valLoss": None,
+                                })
+                    except Exception:
+                        pass
 
             handler = QueueHandler()
-            handler.setLevel(logging.DEBUG)
+            handler.setLevel(logging.INFO)
             mace_logger.addHandler(handler)
 
-            # Parse args and run training in-process (no subprocess/fork)
+            # Run training in-process (no subprocess — avoids CUDA fork issues)
             from mace.cli.run_train import main as mace_train_main
-            import sys
-            old_argv = sys.argv
             sys.argv = ["mace_run_train"] + argv
+            training_ok = False
             try:
                 mace_train_main()
+                training_ok = True
             except SystemExit as e:
                 # mace_train_main() calls sys.exit(0) on success
-                if e.code != 0:
+                training_ok = (e.code is None or e.code == 0)
+                if not training_ok:
+                    print(f"[finetune] Training exited with code {e.code}")
                     q.put({"type": "error", "error": f"Training exited with code {e.code}"})
                     return
-            finally:
-                sys.argv = old_argv
-                mace_logger.removeHandler(handler)
 
-            # Find output model file
+            print(f"[finetune] Training finished, training_ok={training_ok}")
+
+            if not training_ok:
+                q.put({"type": "error", "error": "Training failed"})
+                return
+
+            # Find output model file — MACE names them {name}_run-{seed}_stagetwo.model
             candidates = _glob.glob(
-                os.path.join(FINETUNE_DIR, f"{model_name}*stagetwo.model")
+                os.path.join(FINETUNE_DIR, f"{model_name}*.model")
             )
-            if not candidates:
-                candidates = _glob.glob(
-                    os.path.join(FINETUNE_DIR, f"{model_name}*.model")
-                )
+            print(f"[finetune] Model file candidates: {candidates}")
+
             if not candidates:
                 q.put({
                     "type": "error",
-                    "error": "Training completed but no .model file found",
+                    "error": "Training completed but no .model file found in " + FINETUNE_DIR,
                 })
                 return
 
             model_path = max(candidates, key=os.path.getmtime)
             _finetuned_models[model_name] = model_path
             _mace_calculators.pop(model_name, None)
-            print(f"Fine-tuned model registered: {model_name} -> {model_path}")
+            print(f"[finetune] SUCCESS: {model_name} -> {model_path}")
 
             q.put({
                 "type": "done",
@@ -2178,8 +2193,13 @@ def mace_finetune():
             })
         except Exception as e:
             import traceback
+            print(f"[finetune] ERROR: {e}")
             traceback.print_exc()
             q.put({"type": "error", "error": str(e)})
+        finally:
+            sys.argv = old_argv
+            if handler:
+                logging.getLogger("mace").removeHandler(handler)
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
