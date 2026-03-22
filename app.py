@@ -2051,7 +2051,7 @@ def mace_finetune():
     if not model_name or " " in model_name:
         return jsonify({"error": "modelName required (no spaces)"}), 400
 
-    # Resolve foundation model path
+    # Resolve foundation model path (before entering thread)
     try:
         foundation_path = get_foundation_model_path(foundation_model_id)
     except Exception as e:
@@ -2063,26 +2063,28 @@ def mace_finetune():
     with open(train_path, "w") as f:
         f.write(extxyz)
 
+    # Count frames for logging
+    frame_count = extxyz.count("\nLattice=") + (1 if extxyz.startswith("3\n") or extxyz.startswith("2\n") else 0)
+    print(f"[finetune] Request: model={model_name}, foundation={foundation_model_id}, epochs={epochs}, ~{frame_count} frames")
+
     q = queue.Queue()
 
     def worker():
         import logging
         import glob as _glob
-        import sys
         import re as _re
 
         handler = None
-        old_argv = sys.argv
         try:
-            print(f"[finetune] Starting: model={model_name}, foundation={foundation_model_id}, epochs={epochs}")
-
-            # Clean up old checkpoints for this model name to avoid conflicts
+            # Clean up old checkpoints/models for this name to avoid stale files
             for old_file in _glob.glob(os.path.join(FINETUNE_DIR, f"{model_name}*")):
                 if old_file != train_path:
-                    os.remove(old_file)
-                    print(f"[finetune] Cleaned up old file: {old_file}")
+                    try:
+                        os.remove(old_file)
+                    except OSError:
+                        pass
 
-            # Build args list matching MACE's CLI parser
+            # Build CLI args for MACE training
             argv = [
                 f"--name={model_name}",
                 f"--train_file={train_path}",
@@ -2109,15 +2111,14 @@ def mace_finetune():
                 f"--work_dir={FINETUNE_DIR}",
             ]
 
-            # Intercept MACE's logger to capture epoch progress
+            # Intercept MACE's logger to stream epoch progress via SSE
             mace_logger = logging.getLogger("mace")
+            # MACE validation log format: "Epoch N: head: Default, loss=0.00001234, RMSE_E=... RMSE_F=..."
             epoch_re = _re.compile(
-                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+).*?val[_ ]?loss[=:]\s*([0-9.eE+\-]+)",
-                _re.IGNORECASE,
+                r"Epoch\s+(\d+).*?loss=([0-9.eE+\-]+)", _re.IGNORECASE
             )
-            epoch_re2 = _re.compile(
-                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", _re.IGNORECASE
-            )
+            rmse_e_re = _re.compile(r"RMSE_E[_a-z]*=([0-9.eE+\-]+)", _re.IGNORECASE)
+            rmse_f_re = _re.compile(r"RMSE_F=([0-9.eE+\-]+)", _re.IGNORECASE)
 
             class QueueHandler(logging.Handler):
                 def emit(self, record):
@@ -2125,21 +2126,18 @@ def mace_finetune():
                         msg = self.format(record)
                         m = epoch_re.search(msg)
                         if m:
-                            q.put({
+                            evt = {
                                 "type": "progress",
                                 "epoch": int(m.group(1)),
                                 "loss": float(m.group(2)),
-                                "valLoss": float(m.group(3)),
-                            })
-                        else:
-                            m2 = epoch_re2.search(msg)
-                            if m2:
-                                q.put({
-                                    "type": "progress",
-                                    "epoch": int(m2.group(1)),
-                                    "loss": float(m2.group(2)),
-                                    "valLoss": None,
-                                })
+                            }
+                            me = rmse_e_re.search(msg)
+                            mf = rmse_f_re.search(msg)
+                            if me:
+                                evt["rmseE"] = float(me.group(1))
+                            if mf:
+                                evt["rmseF"] = float(mf.group(1))
+                            q.put(evt)
                     except Exception:
                         pass
 
@@ -2147,57 +2145,40 @@ def mace_finetune():
             handler.setLevel(logging.INFO)
             mace_logger.addHandler(handler)
 
-            # Run training in-process (no subprocess — avoids CUDA fork issues)
-            from mace.cli.run_train import main as mace_train_main
-            sys.argv = ["mace_run_train"] + argv
-            training_ok = False
-            try:
-                mace_train_main()
-                training_ok = True
-            except SystemExit as e:
-                # mace_train_main() calls sys.exit(0) on success
-                training_ok = (e.code is None or e.code == 0)
-                if not training_ok:
-                    print(f"[finetune] Training exited with code {e.code}")
-                    q.put({"type": "error", "error": f"Training exited with code {e.code}"})
-                    return
+            # Parse args via MACE's own parser (avoids sys.argv race conditions)
+            from mace.tools import build_default_arg_parser
+            from mace.cli.run_train import run as mace_run
 
-            print(f"[finetune] Training finished, training_ok={training_ok}")
+            parser = build_default_arg_parser()
+            args = parser.parse_args(argv)
 
-            if not training_ok:
-                q.put({"type": "error", "error": "Training failed"})
-                return
+            # Run training in-process (avoids CUDA fork/subprocess segfaults)
+            print(f"[finetune] Training started on {MACE_DEVICE}...")
+            mace_run(args)
+            print(f"[finetune] Training completed")
 
-            # Find output model file — MACE names them {name}_run-{seed}_stagetwo.model
+            # Find output model file — MACE names: {name}.model or {name}_stagetwo.model
+            # With --seed, may also include _run-{seed}
             candidates = _glob.glob(
                 os.path.join(FINETUNE_DIR, f"{model_name}*.model")
             )
-            print(f"[finetune] Model file candidates: {candidates}")
-
             if not candidates:
-                q.put({
-                    "type": "error",
-                    "error": "Training completed but no .model file found in " + FINETUNE_DIR,
-                })
+                q.put({"type": "error", "error": "Training completed but no .model file found"})
                 return
 
             model_path = max(candidates, key=os.path.getmtime)
             _finetuned_models[model_name] = model_path
             _mace_calculators.pop(model_name, None)
-            print(f"[finetune] SUCCESS: {model_name} -> {model_path}")
+            print(f"[finetune] Registered: {model_name} -> {model_path}")
 
-            q.put({
-                "type": "done",
-                "modelName": model_name,
-                "modelPath": model_path,
-            })
+            q.put({"type": "done", "modelName": model_name, "modelPath": model_path})
+
         except Exception as e:
             import traceback
             print(f"[finetune] ERROR: {e}")
             traceback.print_exc()
             q.put({"type": "error", "error": str(e)})
         finally:
-            sys.argv = old_argv
             if handler:
                 logging.getLogger("mace").removeHandler(handler)
 
@@ -2207,9 +2188,9 @@ def mace_finetune():
     def generate():
         while True:
             try:
-                item = q.get(timeout=600)  # 10 min timeout for training
+                item = q.get(timeout=600)
             except queue.Empty:
-                yield f"data: {dumps({'type': 'error', 'error': 'Training timed out'})}\n\n"
+                yield f"data: {dumps({'type': 'error', 'error': 'Training timed out (10 min)'})}\n\n"
                 break
             yield f"data: {dumps(item)}\n\n"
             if item.get("type") in ("done", "error"):
