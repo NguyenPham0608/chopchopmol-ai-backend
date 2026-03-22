@@ -37,7 +37,7 @@ RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/std
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA support: {torch.version.cuda}')"
 
 # Copy app code + start script (always last — never cached)
-COPY app.py start.sh ./
+COPY app.py start.sh test_finetune.py ./
 RUN chmod +x start.sh
 
 EXPOSE 10000 22

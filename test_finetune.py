@@ -50,7 +50,7 @@ cmd = [
     "--ema", "--ema_decay=0.99",
     "--amsgrad",
     f"--device={device}",
-    "--default_dtype=float32",
+    "--default_dtype=float64",
     f"--foundation_model={foundation}",
     "--correlation=3",
     "--seed=42",

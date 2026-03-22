@@ -2033,10 +2033,6 @@ def mace_finetune():
     """Fine-tune a MACE foundation model on user training data. Streams SSE progress."""
     import queue
     import threading
-    import subprocess
-    import sys
-    import re as _re
-    import glob as _glob
 
     data = request.json
     extxyz = data.get("extxyz", "")
@@ -2061,121 +2057,96 @@ def mace_finetune():
     except Exception as e:
         return jsonify({"error": f"Cannot resolve foundation model: {e}"}), 400
 
-    # Locate MACE training script
-    try:
-        import mace as _mace_pkg
-
-        mace_train_script = os.path.join(
-            os.path.dirname(_mace_pkg.__file__), "cli", "run_train.py"
-        )
-        if not os.path.exists(mace_train_script):
-            # Fallback to scripts/ directory (older MACE versions)
-            mace_train_script = os.path.join(
-                os.path.dirname(_mace_pkg.__file__), "scripts", "run_train.py"
-            )
-        if not os.path.exists(mace_train_script):
-            return jsonify({"error": "MACE run_train.py not found"}), 500
-    except ImportError:
-        return jsonify({"error": "MACE package not installed"}), 500
-
     # Write training data to file
     os.makedirs(FINETUNE_DIR, exist_ok=True)
     train_path = os.path.join(FINETUNE_DIR, f"train_{model_name}.extxyz")
     with open(train_path, "w") as f:
         f.write(extxyz)
 
-    # Build subprocess command
-    cmd = [
-        sys.executable,
-        mace_train_script,
-        f"--name={model_name}",
-        f"--train_file={train_path}",
-        f"--valid_fraction={valid_fraction}",
-        f"--energy_key=energy",
-        f"--forces_key=forces",
-        f"--E0s=average",
-        f"--model=MACE",
-        f"--hidden_irreps={hidden_irreps}",
-        f"--r_max={r_max}",
-        f"--num_interactions={num_interactions}",
-        f"--batch_size={batch_size}",
-        f"--max_num_epochs={epochs}",
-        "--ema",
-        "--ema_decay=0.99",
-        "--amsgrad",
-        f"--device={MACE_DEVICE}",
-        f"--default_dtype={'float32' if MACE_DEVICE == 'cuda' else 'float64'}",
-        f"--foundation_model={foundation_path}",
-        f"--correlation={correlation}",
-        "--seed=42",
-        f"--checkpoints_dir={FINETUNE_DIR}",
-        f"--results_dir={FINETUNE_DIR}",
-        f"--work_dir={FINETUNE_DIR}",
-    ]
-
     q = queue.Queue()
 
     def worker():
         try:
-            # Ensure clean CUDA context for the child process
-            env = os.environ.copy()
-            env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-            # Force the child to re-initialize CUDA from scratch
-            env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0")
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-                start_new_session=True,
-            )
-            # Regex to parse MACE training output lines
-            epoch_re = _re.compile(
+            import logging
+            import glob as _glob
+
+            # Build args list matching MACE's CLI parser
+            argv = [
+                f"--name={model_name}",
+                f"--train_file={train_path}",
+                f"--valid_fraction={valid_fraction}",
+                f"--energy_key=energy",
+                f"--forces_key=forces",
+                f"--E0s=average",
+                f"--model=MACE",
+                f"--hidden_irreps={hidden_irreps}",
+                f"--r_max={r_max}",
+                f"--num_interactions={num_interactions}",
+                f"--batch_size={batch_size}",
+                f"--max_num_epochs={epochs}",
+                "--ema",
+                "--ema_decay=0.99",
+                "--amsgrad",
+                f"--device={MACE_DEVICE}",
+                "--default_dtype=float64",
+                f"--foundation_model={foundation_path}",
+                f"--correlation={correlation}",
+                "--seed=42",
+                f"--checkpoints_dir={FINETUNE_DIR}",
+                f"--results_dir={FINETUNE_DIR}",
+                f"--work_dir={FINETUNE_DIR}",
+            ]
+
+            # Intercept MACE's logger to capture epoch progress
+            mace_logger = logging.getLogger("mace")
+            re_mod = __import__("re")
+            epoch_re = re_mod.compile(
                 r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+).*?val[_ ]?loss[=:]\s*([0-9.eE+\-]+)",
-                _re.IGNORECASE,
+                re_mod.IGNORECASE,
             )
-            epoch_re2 = _re.compile(
-                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", _re.IGNORECASE
+            epoch_re2 = re_mod.compile(
+                r"Epoch\s+(\d+).*?loss[=:]\s*([0-9.eE+\-]+)", re_mod.IGNORECASE
             )
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                m = epoch_re.search(line)
-                if m:
-                    q.put(
-                        {
+
+            class QueueHandler(logging.Handler):
+                def emit(self, record):
+                    msg = self.format(record)
+                    m = epoch_re.search(msg)
+                    if m:
+                        q.put({
                             "type": "progress",
                             "epoch": int(m.group(1)),
                             "loss": float(m.group(2)),
                             "valLoss": float(m.group(3)),
-                        }
-                    )
-                else:
-                    m2 = epoch_re2.search(line)
-                    if m2:
-                        q.put(
-                            {
+                        })
+                    else:
+                        m2 = epoch_re2.search(msg)
+                        if m2:
+                            q.put({
                                 "type": "progress",
                                 "epoch": int(m2.group(1)),
                                 "loss": float(m2.group(2)),
                                 "valLoss": None,
-                            }
-                        )
-                    else:
-                        q.put({"type": "log", "line": line})
+                            })
+                        else:
+                            q.put({"type": "log", "line": msg})
 
-            proc.wait()
-            if proc.returncode != 0:
-                q.put(
-                    {
-                        "type": "error",
-                        "error": f"Training failed with exit code {proc.returncode}",
-                    }
-                )
-                return
+            handler = QueueHandler()
+            handler.setLevel(logging.DEBUG)
+            mace_logger.addHandler(handler)
 
-            # Find output model file — MACE names them {name}_run-{seed}_stagetwo.model
+            # Parse args and run training in-process (no subprocess/fork)
+            from mace.cli.run_train import main as mace_train_main
+            import sys
+            old_argv = sys.argv
+            sys.argv = ["mace_run_train"] + argv
+            try:
+                mace_train_main()
+            finally:
+                sys.argv = old_argv
+                mace_logger.removeHandler(handler)
+
+            # Find output model file
             candidates = _glob.glob(
                 os.path.join(FINETUNE_DIR, f"{model_name}*stagetwo.model")
             )
@@ -2184,28 +2155,24 @@ def mace_finetune():
                     os.path.join(FINETUNE_DIR, f"{model_name}*.model")
                 )
             if not candidates:
-                q.put(
-                    {
-                        "type": "error",
-                        "error": "Training completed but no .model file found",
-                    }
-                )
+                q.put({
+                    "type": "error",
+                    "error": "Training completed but no .model file found",
+                })
                 return
 
-            # Pick most recently modified
             model_path = max(candidates, key=os.path.getmtime)
             _finetuned_models[model_name] = model_path
-            # Evict from calculator cache so it gets freshly loaded
             _mace_calculators.pop(model_name, None)
 
-            q.put(
-                {
-                    "type": "done",
-                    "modelName": model_name,
-                    "modelPath": model_path,
-                }
-            )
+            q.put({
+                "type": "done",
+                "modelName": model_name,
+                "modelPath": model_path,
+            })
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             q.put({"type": "error", "error": str(e)})
 
     t = threading.Thread(target=worker, daemon=True)
