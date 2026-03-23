@@ -992,6 +992,18 @@ def chat_stream():
         if assistant_msg_from_frontend:
             conversationHistory.append(assistant_msg_from_frontend)
 
+    # Inject prior conversation context when resuming a saved conversation
+    prior_context = data.get("priorContext")
+    if prior_context and session_is_new and tool_results is None:
+        conversationHistory.append({
+            "role": "user",
+            "content": f"[Previous conversation context]\n{prior_context}"
+        })
+        conversationHistory.append({
+            "role": "assistant",
+            "content": "Understood. I have context from our previous conversation. How can I help?"
+        })
+
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
     else:
