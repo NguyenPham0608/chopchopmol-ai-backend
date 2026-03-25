@@ -356,6 +356,14 @@ sessions = {}  # {session_id: {"history": [], "last_access": timestamp}}
 MAX_SESSIONS = 500
 SESSION_TTL = 3600  # 1 hour
 
+# Background job store for long-running computations (MACE MD, optimize, batch energy)
+# Results persist here so clients can retrieve them after reconnecting
+jobs = (
+    {}
+)  # {job_id: {"status": "running"|"completed"|"error", "result": {}, "created": float}}
+MAX_JOBS = 200
+JOB_TTL = 3600  # 1 hour
+
 # Prompt cache for speed optimization
 prompt_cache = {}  # {state_hash: prompt_string}
 MAX_PROMPT_CACHE = 1000
@@ -995,14 +1003,18 @@ def chat_stream():
     # Inject prior conversation context when resuming a saved conversation
     prior_context = data.get("priorContext")
     if prior_context and session_is_new and tool_results is None:
-        conversationHistory.append({
-            "role": "user",
-            "content": f"[Previous conversation context]\n{prior_context}"
-        })
-        conversationHistory.append({
-            "role": "assistant",
-            "content": "Understood. I have context from our previous conversation. How can I help?"
-        })
+        conversationHistory.append(
+            {
+                "role": "user",
+                "content": f"[Previous conversation context]\n{prior_context}",
+            }
+        )
+        conversationHistory.append(
+            {
+                "role": "assistant",
+                "content": "Understood. I have context from our previous conversation. How can I help?",
+            }
+        )
 
     if tool_results is None:
         conversationHistory.append({"role": "user", "content": user_message})
@@ -1528,6 +1540,33 @@ def test_mace():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+def _cleanup_jobs():
+    """Remove expired jobs"""
+    now = time()
+    if len(jobs) > MAX_JOBS or len(jobs) % 50 == 0:
+        expired = [jid for jid, j in jobs.items() if now - j["created"] > JOB_TTL]
+        for jid in expired:
+            del jobs[jid]
+
+
+@app.route("/ai/jobs/<job_id>", methods=["GET"])
+def get_job(job_id):
+    """Check status of a background job and retrieve its result"""
+    _cleanup_jobs()
+    if job_id not in jobs:
+        return jsonify({"status": "not_found"}), 404
+    job = jobs[job_id]
+    return jsonify({"status": job["status"], "result": job.get("result")})
+
+
+@app.route("/ai/jobs/<job_id>", methods=["DELETE"])
+def delete_job(job_id):
+    """Clean up a completed job"""
+    if job_id in jobs:
+        del jobs[job_id]
+    return jsonify({"success": True})
+
+
 @app.route("/ai/mace/optimize", methods=["POST"])
 def optimize_geometry():
     """Geometry optimization using MACE-MP + ASE BFGS"""
@@ -1537,6 +1576,9 @@ def optimize_geometry():
     import numpy as np
 
     data = request.json
+    job_id = data.get("jobId")
+    if job_id:
+        jobs[job_id] = {"status": "running", "created": time(), "type": "optimize"}
     atoms_data = data.get("atoms", [])
     fmax = data.get("fmax", 0.05)
     max_steps = data.get("maxSteps", 100)
@@ -1611,16 +1653,33 @@ def optimize_geometry():
         if include_forces:
             result["forces"] = forces.tolist()
 
+        if job_id:
+            jobs[job_id] = {
+                "status": "completed",
+                "result": result,
+                "created": time(),
+                "type": "optimize",
+            }
         return jsonify(result)
     except Exception as e:
         print(f"❌ MACE Optimization Error: {str(e)}")
         traceback.print_exc()
+        if job_id:
+            jobs[job_id] = {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "optimize",
+            }
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/ai/mace/energy-batch", methods=["POST"])
 def calculate_energy_batch():
     data = request.json
+    job_id = data.get("jobId")
+    if job_id:
+        jobs[job_id] = {"status": "running", "created": time(), "type": "energy-batch"}
     frames_data = data.get("frames", [])
 
     if not frames_data:
@@ -1670,18 +1729,31 @@ def calculate_energy_batch():
         min_idx = int(np.argmin(energies))
         max_idx = int(np.argmax(energies))
 
-        return jsonify(
-            {
-                "success": True,
-                "frameCount": len(results),
-                "energies": results,
-                "lowestEnergyFrame": min_idx,
-                "highestEnergyFrame": max_idx,
-                "energyRange_eV": round(max(energies) - min(energies), 6),
+        batch_result = {
+            "success": True,
+            "frameCount": len(results),
+            "energies": results,
+            "lowestEnergyFrame": min_idx,
+            "highestEnergyFrame": max_idx,
+            "energyRange_eV": round(max(energies) - min(energies), 6),
+        }
+        if job_id:
+            jobs[job_id] = {
+                "status": "completed",
+                "result": batch_result,
+                "created": time(),
+                "type": "energy-batch",
             }
-        )
+        return jsonify(batch_result)
     except Exception as e:
         print(f"MACE batch error: {e}", flush=True)
+        if job_id:
+            jobs[job_id] = {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "energy-batch",
+            }
         return jsonify({"error": str(e)}), 500
 
 
@@ -1696,13 +1768,16 @@ def run_molecular_dynamics():
 
     t_start = time()
     data = request.json
+    job_id = data.get("jobId")
+    if job_id:
+        jobs[job_id] = {"status": "running", "created": time(), "type": "md"}
     atoms_data = data.get("atoms", [])
     temperature_K = data.get("temperature", 300)
     timestep_fs = data.get("timestep", 1.0)
     friction = data.get("friction", 0.01)
     include_forces = data.get("includeForces", True)
     print(
-        f"MD request: {len(atoms_data)} atoms, model={data.get('model')}, frames={data.get('frames')}, steps={data.get('steps')}",
+        f"MD request: {len(atoms_data)} atoms, model={data.get('model')}, frames={data.get('frames')}, steps={data.get('steps')}, jobId={job_id}",
         flush=True,
     )
 
@@ -1805,11 +1880,25 @@ def run_molecular_dynamics():
             f"MD complete: {len(trajectory_frames)} frames in {time() - t_start:.1f}s",
             flush=True,
         )
+        if job_id:
+            jobs[job_id] = {
+                "status": "completed",
+                "result": result,
+                "created": time(),
+                "type": "md",
+            }
         return jsonify(result)
 
     except Exception as e:
         print(f"❌ MACE MD Error after {time() - t_start:.1f}s: {str(e)}", flush=True)
         traceback.print_exc()
+        if job_id:
+            jobs[job_id] = {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "md",
+            }
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
@@ -2076,8 +2165,12 @@ def mace_finetune():
         f.write(extxyz)
 
     # Count frames for logging
-    frame_count = extxyz.count("\nLattice=") + (1 if extxyz.startswith("3\n") or extxyz.startswith("2\n") else 0)
-    print(f"[finetune] Request: model={model_name}, foundation={foundation_model_id}, epochs={epochs}, ~{frame_count} frames")
+    frame_count = extxyz.count("\nLattice=") + (
+        1 if extxyz.startswith("3\n") or extxyz.startswith("2\n") else 0
+    )
+    print(
+        f"[finetune] Request: model={model_name}, foundation={foundation_model_id}, epochs={epochs}, ~{frame_count} frames"
+    )
 
     q = queue.Queue()
 
@@ -2171,11 +2264,14 @@ def mace_finetune():
 
             # Find output model file — MACE names: {name}.model or {name}_stagetwo.model
             # With --seed, may also include _run-{seed}
-            candidates = _glob.glob(
-                os.path.join(FINETUNE_DIR, f"{model_name}*.model")
-            )
+            candidates = _glob.glob(os.path.join(FINETUNE_DIR, f"{model_name}*.model"))
             if not candidates:
-                q.put({"type": "error", "error": "Training completed but no .model file found"})
+                q.put(
+                    {
+                        "type": "error",
+                        "error": "Training completed but no .model file found",
+                    }
+                )
                 return
 
             model_path = max(candidates, key=os.path.getmtime)
@@ -2187,6 +2283,7 @@ def mace_finetune():
 
         except Exception as e:
             import traceback
+
             print(f"[finetune] ERROR: {e}")
             traceback.print_exc()
             q.put({"type": "error", "error": str(e)})
