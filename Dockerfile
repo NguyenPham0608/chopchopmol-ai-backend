@@ -36,6 +36,9 @@ RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/std
 # Verify CUDA torch was not overwritten by CPU version
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA support: {torch.version.cuda}')"
 
+# Verify cuequivariance CUDA kernels are importable
+RUN python -c "import cuequivariance as cue; print(f'cuequivariance {cue.__version__}'); import cuequivariance_torch; print('cuequivariance-torch OK')" || echo "WARNING: cuequivariance import failed — MACE will use PyTorch fallback"
+
 # Copy app code + start script (always last — never cached)
 COPY app.py start.sh test_finetune.py ./
 RUN chmod +x start.sh

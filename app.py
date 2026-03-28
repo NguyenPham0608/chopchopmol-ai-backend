@@ -165,12 +165,17 @@ def get_mace_calculator(model_id="mace-mp-0a"):
     with _finetune_lock:
         ft_path = _finetuned_models.get(model_id)
 
-    def _load_calc(device):
+    def _load_calc(device, cueq=None):
+        # enable_cueq=True uses NVIDIA cuequivariance CUDA kernels (up to 5x faster).
+        # Requires: cuequivariance + cuequivariance-torch + cuequivariance-ops-torch-cu12
+        # NOTE: enable_cueq is mutually exclusive with compile_mode (don't combine them).
+        use_cueq = cueq if cueq is not None else (device == "cuda")
         if ft_path:
             return MACECalculator(
                 model_paths=ft_path,
                 default_dtype=MACE_DTYPE,
                 device=device,
+                enable_cueq=use_cueq,
             )
         # Map optimizer/MD names to mace_mp model args
         model_map = {"small": "small", "medium": "medium", "large": "large"}
@@ -180,21 +185,28 @@ def get_mace_calculator(model_id="mace-mp-0a"):
             model_url = MACE_MODELS[model_id]["url"]
         else:
             model_url = MACE_MODELS["mace-mp-0a"]["url"]
-        return mace_mp(model=model_url, default_dtype=MACE_DTYPE, device=device)
+        return mace_mp(model=model_url, default_dtype=MACE_DTYPE, device=device, enable_cueq=use_cueq)
 
+    # Fallback chain: CUDA+cueq → CUDA without cueq → CPU
     try:
         calc = _load_calc(MACE_DEVICE)
     except Exception as e:
-        if MACE_DEVICE != "cpu":
-            print(f"⚠️ MACE load failed on {MACE_DEVICE} for {model_id}: {e}")
-            print(f"⚠️ Falling back to CPU")
+        if MACE_DEVICE == "cpu":
+            raise
+        print(f"⚠️ MACE load failed on {MACE_DEVICE} for {model_id}: {e}", flush=True)
+        # Try CUDA without cuequivariance (it's the usual culprit)
+        try:
+            print(f"⚠️ Retrying {MACE_DEVICE} without cuequivariance...", flush=True)
+            calc = _load_calc(MACE_DEVICE, cueq=False)
+            print(f"✅ MACE loaded on {MACE_DEVICE} (cueq disabled)", flush=True)
+        except Exception as e2:
+            print(f"⚠️ MACE also failed on {MACE_DEVICE} without cueq: {e2}", flush=True)
+            print(f"⚠️ Falling back to CPU", flush=True)
             MACE_DEVICE = "cpu"
             with _mace_lock:
                 _mace_calculators.clear()
             _cuda_cleanup()
             calc = _load_calc("cpu")
-        else:
-            raise
 
     with _mace_lock:
         _mace_calculators[model_id] = calc
@@ -338,54 +350,38 @@ def _calculate_energy_batch_native(frames_data, model_id, include_forces):
 
 
 def warmup_mace():
-    """Preload ALL common MACE calculators and JIT-compile GPU kernels.
-    If CUDA fails, fall back to CPU so the server still works."""
-    global MACE_DEVICE
+    """Preload ALL common MACE calculators and run a test inference.
+    get_mace_calculator() handles the fallback chain: CUDA+cueq → CUDA → CPU."""
     t0 = time()
     models_to_warm = ["mace-mp-0a", "small", "medium"]
-
-    def _try_warmup(device_label):
-        test_atoms = Atoms(
-            "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True
-        )
-        for model_id in models_to_warm:
-            t1 = time()
+    test_atoms = Atoms(
+        "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True
+    )
+    for model_id in models_to_warm:
+        t1 = time()
+        try:
+            # get_mace_calculator already has CUDA+cueq → CUDA → CPU fallback
             calc = get_mace_calculator(model_id)
             test_atoms.calc = calc
             test_atoms.get_potential_energy()
             test_atoms.get_forces()
-            print(f"  Warmed {model_id} in {time() - t1:.1f}s ({device_label})")
-
-    try:
-        _try_warmup(MACE_DEVICE)
-        print(
-            f"MACE warmup complete in {time() - t0:.1f}s (device={MACE_DEVICE}, {len(models_to_warm)} models)"
-        )
-    except Exception as e:
-        print(f"⚠️ MACE warmup FAILED on {MACE_DEVICE}: {e}")
-        if MACE_DEVICE != "cpu":
-            # CUDA failed — fall back to CPU so the server actually works
-            print(f"⚠️ Falling back MACE to CPU (was {MACE_DEVICE})")
-            MACE_DEVICE = "cpu"
-            # Clear any broken CUDA-loaded calculators
-            with _mace_lock:
-                _mace_calculators.clear()
-            # Free corrupted CUDA state
-            if torch.cuda.is_available():
+            print(f"  Warmed {model_id} in {time() - t1:.1f}s (device={MACE_DEVICE})")
+        except Exception as e:
+            import traceback as _tb
+            print(f"⚠️ MACE warmup failed for {model_id}: {e}")
+            _tb.print_exc()
+            # If get_potential_energy/get_forces failed (not loading), try CPU fallback
+            if _is_cuda_error(e):
+                _fallback_to_cpu(str(e))
                 try:
-                    torch.cuda.empty_cache()
-                    torch.cuda.reset_peak_memory_stats()
-                except Exception:
-                    pass
-            try:
-                _try_warmup("cpu")
-                print(
-                    f"MACE warmup complete on CPU fallback in {time() - t0:.1f}s"
-                )
-            except Exception as e2:
-                print(f"❌ MACE warmup also failed on CPU: {e2} — first request will be slow")
-        else:
-            print(f"❌ MACE warmup failed on CPU: {e} — first request will be slow")
+                    calc = get_mace_calculator(model_id)
+                    test_atoms.calc = calc
+                    test_atoms.get_potential_energy()
+                    test_atoms.get_forces()
+                    print(f"  Warmed {model_id} on CPU fallback in {time() - t1:.1f}s")
+                except Exception as e2:
+                    print(f"  ❌ {model_id} also failed on CPU: {e2}")
+    print(f"MACE warmup done in {time() - t0:.1f}s (device={MACE_DEVICE})")
 
 
 def dumps(obj):
@@ -3809,21 +3805,16 @@ def _startup():
         try:
             name = torch.cuda.get_device_name(0)
             mem = torch.cuda.get_device_properties(0).total_mem / 1e9
-            print(f"CUDA GPU: {name} | Memory: {mem:.1f} GB")
-            # Quick sanity test: can we actually do GPU math?
-            t = torch.randn(64, 64, device="cuda")
-            _ = t @ t
-            del t
-            torch.cuda.empty_cache()
-            print("CUDA tensor test: ✅ passed")
+            cuda_ver = torch.version.cuda or "unknown"
+            print(f"CUDA GPU: {name} | Memory: {mem:.1f} GB | CUDA toolkit: {cuda_ver} | PyTorch: {torch.__version__}")
         except Exception as e:
-            print(f"❌ CUDA test FAILED: {e}")
-            print(f"⚠️ Forcing MACE to CPU — CUDA is not working")
-            MACE_DEVICE = "cpu"
+            print(f"CUDA info unavailable: {e}")
     try:
         get_dft_rks()
     except Exception as e:
         print(f"DFT GPU check failed: {e}")
+    # warmup_mace() is the real GPU test — it loads models and runs inference.
+    # If CUDA fails here, it automatically falls back to CPU.
     warmup_mace()
     _scan_finetuned_models()
     print(f"✅ Startup complete. MACE device: {MACE_DEVICE}")
