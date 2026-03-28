@@ -3,7 +3,7 @@ services:
     name: chopchopmol-ai-backend
     runtime: python
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 600
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 600
     envVars:
       - key: OPENAI_API_KEY
         sync: false

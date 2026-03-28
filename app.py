@@ -13,6 +13,7 @@ import hashlib
 import zlib
 from io import BytesIO
 from time import time
+from threading import Lock, Semaphore
 import torch
 import httpx
 
@@ -111,9 +112,17 @@ def get_dft_rks():
 
 # Lazy-load MACE to avoid slow startup
 _mace_calculators = {}
+_mace_lock = Lock()
 
 # Registry of user fine-tuned models: {model_name: model_path}
 _finetuned_models = {}
+_finetune_lock = Lock()
+
+# Serialize heavy compute (MACE, DFT, fine-tuning).
+# ASE calculators are NOT thread-safe — two threads sharing a cached calculator
+# corrupt internal state and cause hangs/wrong results. GPU ops also can't safely
+# overlap. This semaphore ensures only 1 heavy compute runs at a time.
+_compute_semaphore = Semaphore(1)
 FINETUNE_DIR = os.environ.get("MACE_FINETUNE_DIR", "/tmp/mace_finetuned")
 
 MACE_MODELS = {
@@ -143,37 +152,53 @@ MACE_MODELS = {
 
 def get_mace_calculator(model_id="mace-mp-0a"):
     """Get a cached MACE calculator. Accepts energy model IDs (mace-mp-0a, etc.),
-    optimizer/MD model names (small, medium, large), and fine-tuned model names."""
-    global _mace_calculators
-    if model_id not in _mace_calculators:
-        from mace.calculators import mace_mp, MACECalculator
-
-        # Check fine-tuned models first
-        if model_id in _finetuned_models:
-            _mace_calculators[model_id] = MACECalculator(
-                model_paths=_finetuned_models[model_id],
-                default_dtype=MACE_DTYPE,
-                device=MACE_DEVICE,
-            )
+    optimizer/MD model names (small, medium, large), and fine-tuned model names.
+    Falls back to CPU if CUDA fails during model loading."""
+    global MACE_DEVICE
+    with _mace_lock:
+        if model_id in _mace_calculators:
             return _mace_calculators[model_id]
 
+    from mace.calculators import mace_mp, MACECalculator
+
+    # Check fine-tuned models first
+    with _finetune_lock:
+        ft_path = _finetuned_models.get(model_id)
+
+    def _load_calc(device):
+        if ft_path:
+            return MACECalculator(
+                model_paths=ft_path,
+                default_dtype=MACE_DTYPE,
+                device=device,
+            )
         # Map optimizer/MD names to mace_mp model args
-        model_map = {
-            "small": "small",
-            "medium": "medium",
-            "large": "large",
-        }
+        model_map = {"small": "small", "medium": "medium", "large": "large"}
         if model_id in model_map:
             model_url = model_map[model_id]
         elif model_id in MACE_MODELS:
             model_url = MACE_MODELS[model_id]["url"]
         else:
             model_url = MACE_MODELS["mace-mp-0a"]["url"]
+        return mace_mp(model=model_url, default_dtype=MACE_DTYPE, device=device)
 
-        _mace_calculators[model_id] = mace_mp(
-            model=model_url, default_dtype=MACE_DTYPE, device=MACE_DEVICE
-        )
-    return _mace_calculators[model_id]
+    try:
+        calc = _load_calc(MACE_DEVICE)
+    except Exception as e:
+        if MACE_DEVICE != "cpu":
+            print(f"⚠️ MACE load failed on {MACE_DEVICE} for {model_id}: {e}")
+            print(f"⚠️ Falling back to CPU")
+            MACE_DEVICE = "cpu"
+            with _mace_lock:
+                _mace_calculators.clear()
+            _cuda_cleanup()
+            calc = _load_calc("cpu")
+        else:
+            raise
+
+    with _mace_lock:
+        _mace_calculators[model_id] = calc
+    return calc
 
 
 def get_foundation_model_path(model_id):
@@ -313,10 +338,13 @@ def _calculate_energy_batch_native(frames_data, model_id, include_forces):
 
 
 def warmup_mace():
-    """Preload ALL common MACE calculators and JIT-compile GPU kernels."""
+    """Preload ALL common MACE calculators and JIT-compile GPU kernels.
+    If CUDA fails, fall back to CPU so the server still works."""
+    global MACE_DEVICE
     t0 = time()
     models_to_warm = ["mace-mp-0a", "small", "medium"]
-    try:
+
+    def _try_warmup(device_label):
         test_atoms = Atoms(
             "H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True
         )
@@ -326,14 +354,38 @@ def warmup_mace():
             test_atoms.calc = calc
             test_atoms.get_potential_energy()
             test_atoms.get_forces()
-            print(f"  Warmed {model_id} in {time() - t1:.1f}s")
+            print(f"  Warmed {model_id} in {time() - t1:.1f}s ({device_label})")
+
+    try:
+        _try_warmup(MACE_DEVICE)
         print(
             f"MACE warmup complete in {time() - t0:.1f}s (device={MACE_DEVICE}, {len(models_to_warm)} models)"
         )
     except Exception as e:
-        print(
-            f"MACE warmup failed after {time() - t0:.1f}s: {e} — first request will be slow"
-        )
+        print(f"⚠️ MACE warmup FAILED on {MACE_DEVICE}: {e}")
+        if MACE_DEVICE != "cpu":
+            # CUDA failed — fall back to CPU so the server actually works
+            print(f"⚠️ Falling back MACE to CPU (was {MACE_DEVICE})")
+            MACE_DEVICE = "cpu"
+            # Clear any broken CUDA-loaded calculators
+            with _mace_lock:
+                _mace_calculators.clear()
+            # Free corrupted CUDA state
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
+            try:
+                _try_warmup("cpu")
+                print(
+                    f"MACE warmup complete on CPU fallback in {time() - t0:.1f}s"
+                )
+            except Exception as e2:
+                print(f"❌ MACE warmup also failed on CPU: {e2} — first request will be slow")
+        else:
+            print(f"❌ MACE warmup failed on CPU: {e} — first request will be slow")
 
 
 def dumps(obj):
@@ -353,6 +405,7 @@ CORS(
 
 # Store sessions in memory
 sessions = {}  # {session_id: {"history": [], "last_access": timestamp}}
+_sessions_lock = Lock()
 MAX_SESSIONS = 500
 SESSION_TTL = 3600  # 1 hour
 
@@ -361,17 +414,20 @@ SESSION_TTL = 3600  # 1 hour
 jobs = (
     {}
 )  # {job_id: {"status": "running"|"completed"|"error", "result": {}, "created": float}}
+_jobs_lock = Lock()
 MAX_JOBS = 200
 JOB_TTL = 3600  # 1 hour
 
 # Prompt cache for speed optimization
 prompt_cache = {}  # {state_hash: prompt_string}
+_prompt_cache_lock = Lock()
 MAX_PROMPT_CACHE = 1000
 
 # Molden molecule + AO grid cache
 # Key: (content_hash, gridSize, padding)
 # Value: dict with mol, mo_coeff, mo_energy, mo_occ, ao_values, grid_shape, grid_meta
 molden_cache = {}
+_molden_cache_lock = Lock()
 MAX_MOLDEN_CACHE = 10
 MOLDEN_CACHE_TTL = 1800  # 30 minutes
 BOHR_TO_ANG = 0.529177249
@@ -384,20 +440,21 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
     content_hash = hashlib.sha256(molden_content.encode()).hexdigest()[:16]
     cache_key = (content_hash, grid_size, padding)
 
-    if cache_key in molden_cache:
-        molden_cache[cache_key]["last_access"] = time()
-        return molden_cache[cache_key]
+    with _molden_cache_lock:
+        if cache_key in molden_cache:
+            molden_cache[cache_key]["last_access"] = time()
+            return molden_cache[cache_key]
 
-    # Evict expired or overflow entries
-    now = time()
-    expired = [
-        k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL
-    ]
-    for k in expired:
-        del molden_cache[k]
-    if len(molden_cache) >= MAX_MOLDEN_CACHE:
-        oldest = min(molden_cache, key=lambda k: molden_cache[k]["last_access"])
-        del molden_cache[oldest]
+        # Evict expired or overflow entries
+        now = time()
+        expired = [
+            k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL
+        ]
+        for k in expired:
+            del molden_cache[k]
+        if len(molden_cache) >= MAX_MOLDEN_CACHE:
+            oldest = min(molden_cache, key=lambda k: molden_cache[k]["last_access"])
+            del molden_cache[oldest]
 
     from pyscf.tools import molden as pyscf_molden
 
@@ -469,7 +526,8 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         "lumo_index": lumo_index,
         "last_access": time(),
     }
-    molden_cache[cache_key] = entry
+    with _molden_cache_lock:
+        molden_cache[cache_key] = entry
 
     # Pre-compute HOMO/LUMO MO values in background so they're ready for batch requests
     import threading
@@ -837,7 +895,16 @@ RULES:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    info = {"status": "ok", "mace_device": MACE_DEVICE}
+    if torch.cuda.is_available():
+        try:
+            info["gpu"] = torch.cuda.get_device_name(0)
+            info["gpu_memory_free_gb"] = round(
+                (torch.cuda.get_device_properties(0).total_mem - torch.cuda.memory_allocated(0)) / 1e9, 1
+            )
+        except Exception:
+            info["gpu"] = "error"
+    return jsonify(info)
 
 
 def convert_to_claude_messages(history):
@@ -968,20 +1035,21 @@ def chat_stream():
 
     # Cleanup old sessions periodically
     now = time.time()
-    if len(sessions) > MAX_SESSIONS or len(sessions) % 100 == 0:
-        expired = [
-            sid for sid, s in sessions.items() if now - s["last_access"] > SESSION_TTL
-        ]
-        for sid in expired:
-            del sessions[sid]
+    with _sessions_lock:
+        if len(sessions) > MAX_SESSIONS or len(sessions) % 100 == 0:
+            expired = [
+                sid for sid, s in sessions.items() if now - s["last_access"] > SESSION_TTL
+            ]
+            for sid in expired:
+                del sessions[sid]
 
-    session_is_new = session_id not in sessions
-    if session_is_new:
-        sessions[session_id] = {"history": [], "last_access": now}
-    else:
-        sessions[session_id]["last_access"] = now
+        session_is_new = session_id not in sessions
+        if session_is_new:
+            sessions[session_id] = {"history": [], "last_access": now}
+        else:
+            sessions[session_id]["last_access"] = now
 
-    conversationHistory = sessions[session_id]["history"]
+        conversationHistory = sessions[session_id]["history"]
 
     # Detect session loss: tool results arriving for a brand-new (empty) session
     # means the server restarted and lost in-memory sessions during tool execution.
@@ -1079,15 +1147,18 @@ def chat_stream():
 
     # Use cached prompt if available (keyed by state + model)
     state_hash = hash_state(state) + ":" + model
-    if state_hash in prompt_cache:
-        systemPrompt = prompt_cache[state_hash]
+    with _prompt_cache_lock:
+        cached_prompt = prompt_cache.get(state_hash)
+    if cached_prompt:
+        systemPrompt = cached_prompt
         print(f"⚡ Using cached prompt (hash: {state_hash[:8]})", flush=True)
     else:
         systemPrompt = build_system_prompt(state, model)
-        prompt_cache[state_hash] = systemPrompt
-        # Limit cache size
-        if len(prompt_cache) > MAX_PROMPT_CACHE:
-            prompt_cache.pop(next(iter(prompt_cache)))
+        with _prompt_cache_lock:
+            prompt_cache[state_hash] = systemPrompt
+            # Limit cache size
+            if len(prompt_cache) > MAX_PROMPT_CACHE:
+                prompt_cache.pop(next(iter(prompt_cache)))
         print(
             f"⏱️ Prompt built: {(time.time() - t_prompt) * 1000:.0f}ms, length: {len(systemPrompt)} chars",
             flush=True,
@@ -1181,6 +1252,12 @@ def chat_stream():
     )
 
     def generate():
+        import queue
+        import threading
+
+        HEARTBEAT_INTERVAL = 15  # seconds
+        _SENTINEL = object()  # marks end of AI stream
+
         t0 = time.time()
         print(f"🚀 Starting OpenAI call...", flush=True)
         try:
@@ -1280,7 +1357,33 @@ def chat_stream():
             current_block_index = None
             openai_reasoning_started = False
 
-            for chunk in stream:
+            # Feed AI stream chunks into a queue so we can yield heartbeats
+            # while waiting for the next chunk (prevents silent connection drops)
+            chunk_q = queue.Queue()
+
+            def _stream_reader():
+                try:
+                    for c in stream:
+                        chunk_q.put(c)
+                except Exception as exc:
+                    chunk_q.put(exc)
+                finally:
+                    chunk_q.put(_SENTINEL)
+
+            reader_thread = threading.Thread(target=_stream_reader, daemon=True)
+            reader_thread.start()
+
+            while True:
+                try:
+                    chunk = chunk_q.get(timeout=HEARTBEAT_INTERVAL)
+                except queue.Empty:
+                    # No data for HEARTBEAT_INTERVAL seconds — send keepalive
+                    yield f"data: {dumps({'type': 'heartbeat'})}\n\n"
+                    continue
+                if chunk is _SENTINEL:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
                 if first_chunk:
                     print(
                         f"🔥 OpenAI/Claude TTFT: {(time.time() - t0) * 1000:.0f}ms",
@@ -1492,6 +1595,49 @@ def chat_stream():
     )
 
 
+def _cuda_cleanup():
+    """Free cached GPU memory after heavy computations."""
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _is_cuda_error(e):
+    """Check if an exception is a CUDA/GPU error that warrants fallback to CPU."""
+    msg = str(e).lower()
+    return any(x in msg for x in [
+        "cuda", "gpu", "cublas", "cudnn", "nccl", "device-side assert",
+        "illegal memory access", "out of memory", "cuequivariance",
+    ])
+
+
+def _fallback_to_cpu(error_msg=""):
+    """Switch MACE to CPU after a CUDA failure. Clears broken GPU calculators."""
+    global MACE_DEVICE
+    if MACE_DEVICE == "cpu":
+        return
+    print(f"⚠️ CUDA failure, switching MACE to CPU. Error: {error_msg}", flush=True)
+    MACE_DEVICE = "cpu"
+    with _mace_lock:
+        _mace_calculators.clear()
+    _cuda_cleanup()
+
+
+# How long a new compute request will wait for the semaphore before returning 503
+_COMPUTE_QUEUE_TIMEOUT = 30  # seconds
+
+
+def _acquire_compute(timeout=_COMPUTE_QUEUE_TIMEOUT):
+    """Try to acquire the compute semaphore. Returns True if acquired, False if timed out."""
+    return _compute_semaphore.acquire(timeout=timeout)
+
+
+def _release_compute():
+    _compute_semaphore.release()
+
+
 @app.route("/ai/mace/energy", methods=["POST"])
 def calculate_energy():
     """Calculate single-point energy using MACE-MP"""
@@ -1502,6 +1648,9 @@ def calculate_energy():
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -1525,7 +1674,12 @@ def calculate_energy():
 
         return jsonify(result)
     except Exception as e:
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
         return jsonify({"error": str(e)}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 @app.route("/ai/mace/test", methods=["GET"])
@@ -1540,30 +1694,39 @@ def test_mace():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+def _set_job(job_id, data):
+    """Thread-safe job update."""
+    if job_id:
+        with _jobs_lock:
+            jobs[job_id] = data
+
+
 def _cleanup_jobs():
     """Remove expired jobs"""
     now = time()
-    if len(jobs) > MAX_JOBS or len(jobs) % 50 == 0:
-        expired = [jid for jid, j in jobs.items() if now - j["created"] > JOB_TTL]
-        for jid in expired:
-            del jobs[jid]
+    with _jobs_lock:
+        if len(jobs) > MAX_JOBS or len(jobs) % 50 == 0:
+            expired = [jid for jid, j in jobs.items() if now - j["created"] > JOB_TTL]
+            for jid in expired:
+                del jobs[jid]
 
 
 @app.route("/ai/jobs/<job_id>", methods=["GET"])
 def get_job(job_id):
     """Check status of a background job and retrieve its result"""
     _cleanup_jobs()
-    if job_id not in jobs:
-        return jsonify({"status": "not_found"}), 404
-    job = jobs[job_id]
+    with _jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"status": "not_found"}), 404
+        job = jobs[job_id]
     return jsonify({"status": job["status"], "result": job.get("result")})
 
 
 @app.route("/ai/jobs/<job_id>", methods=["DELETE"])
 def delete_job(job_id):
     """Clean up a completed job"""
-    if job_id in jobs:
-        del jobs[job_id]
+    with _jobs_lock:
+        jobs.pop(job_id, None)
     return jsonify({"success": True})
 
 
@@ -1577,8 +1740,7 @@ def optimize_geometry():
 
     data = request.json
     job_id = data.get("jobId")
-    if job_id:
-        jobs[job_id] = {"status": "running", "created": time(), "type": "optimize"}
+    _set_job(job_id, {"status": "running", "created": time(), "type": "optimize"})
     atoms_data = data.get("atoms", [])
     fmax = data.get("fmax", 0.05)
     max_steps = data.get("maxSteps", 100)
@@ -1586,6 +1748,9 @@ def optimize_geometry():
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -1653,37 +1818,32 @@ def optimize_geometry():
         if include_forces:
             result["forces"] = forces.tolist()
 
-        if job_id:
-            jobs[job_id] = {
-                "status": "completed",
-                "result": result,
-                "created": time(),
-                "type": "optimize",
-            }
+        _set_job(job_id, {"status": "completed", "result": result, "created": time(), "type": "optimize"})
         return jsonify(result)
     except Exception as e:
         print(f"❌ MACE Optimization Error: {str(e)}")
         traceback.print_exc()
-        if job_id:
-            jobs[job_id] = {
-                "status": "error",
-                "result": {"error": str(e)},
-                "created": time(),
-                "type": "optimize",
-            }
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
+        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "optimize"})
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 @app.route("/ai/mace/energy-batch", methods=["POST"])
 def calculate_energy_batch():
     data = request.json
     job_id = data.get("jobId")
-    if job_id:
-        jobs[job_id] = {"status": "running", "created": time(), "type": "energy-batch"}
+    _set_job(job_id, {"status": "running", "created": time(), "type": "energy-batch"})
     frames_data = data.get("frames", [])
 
     if not frames_data:
         return jsonify({"error": "No frames provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     try:
         model_id = data.get("model", "mace-mp-0a")
@@ -1737,24 +1897,17 @@ def calculate_energy_batch():
             "highestEnergyFrame": max_idx,
             "energyRange_eV": round(max(energies) - min(energies), 6),
         }
-        if job_id:
-            jobs[job_id] = {
-                "status": "completed",
-                "result": batch_result,
-                "created": time(),
-                "type": "energy-batch",
-            }
+        _set_job(job_id, {"status": "completed", "result": batch_result, "created": time(), "type": "energy-batch"})
         return jsonify(batch_result)
     except Exception as e:
         print(f"MACE batch error: {e}", flush=True)
-        if job_id:
-            jobs[job_id] = {
-                "status": "error",
-                "result": {"error": str(e)},
-                "created": time(),
-                "type": "energy-batch",
-            }
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
+        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "energy-batch"})
         return jsonify({"error": str(e)}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 @app.route("/ai/mace/md", methods=["POST"])
@@ -1769,8 +1922,7 @@ def run_molecular_dynamics():
     t_start = time()
     data = request.json
     job_id = data.get("jobId")
-    if job_id:
-        jobs[job_id] = {"status": "running", "created": time(), "type": "md"}
+    _set_job(job_id, {"status": "running", "created": time(), "type": "md"})
     atoms_data = data.get("atoms", [])
     temperature_K = data.get("temperature", 300)
     timestep_fs = data.get("timestep", 1.0)
@@ -1791,6 +1943,9 @@ def run_molecular_dynamics():
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -1880,26 +2035,19 @@ def run_molecular_dynamics():
             f"MD complete: {len(trajectory_frames)} frames in {time() - t_start:.1f}s",
             flush=True,
         )
-        if job_id:
-            jobs[job_id] = {
-                "status": "completed",
-                "result": result,
-                "created": time(),
-                "type": "md",
-            }
+        _set_job(job_id, {"status": "completed", "result": result, "created": time(), "type": "md"})
         return jsonify(result)
 
     except Exception as e:
         print(f"❌ MACE MD Error after {time() - t_start:.1f}s: {str(e)}", flush=True)
         traceback.print_exc()
-        if job_id:
-            jobs[job_id] = {
-                "status": "error",
-                "result": {"error": str(e)},
-                "created": time(),
-                "type": "md",
-            }
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
+        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "md"})
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 # ── Streaming MACE Endpoints (real-time frame-by-frame) ────────────────────
@@ -1939,6 +2087,9 @@ def run_md_stream():
     q = queue.Queue()
 
     def worker():
+        if not _acquire_compute(timeout=60):
+            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            return
         try:
             symbols = [a["element"] for a in atoms_data]
             positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
@@ -2004,7 +2155,12 @@ def run_md_stream():
                 }
             )
         except Exception as e:
+            if _is_cuda_error(e):
+                _fallback_to_cpu(str(e))
             q.put({"type": "error", "error": str(e)})
+        finally:
+            _release_compute()
+            _cuda_cleanup()
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -2051,6 +2207,9 @@ def optimize_geometry_stream():
     q = queue.Queue()
 
     def worker():
+        if not _acquire_compute(timeout=60):
+            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            return
         try:
             symbols = [a["element"] for a in atoms_data]
             positions = np.array([[a["x"], a["y"], a["z"]] for a in atoms_data])
@@ -2103,7 +2262,12 @@ def optimize_geometry_stream():
                 }
             )
         except Exception as e:
+            if _is_cuda_error(e):
+                _fallback_to_cpu(str(e))
             q.put({"type": "error", "error": str(e)})
+        finally:
+            _release_compute()
+            _cuda_cleanup()
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -2179,6 +2343,9 @@ def mace_finetune():
         import glob as _glob
         import re as _re
 
+        if not _acquire_compute(timeout=60):
+            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            return
         handler = None
         try:
             # Clean up old checkpoints/models for this name to avoid stale files
@@ -2275,8 +2442,10 @@ def mace_finetune():
                 return
 
             model_path = max(candidates, key=os.path.getmtime)
-            _finetuned_models[model_name] = model_path
-            _mace_calculators.pop(model_name, None)
+            with _finetune_lock:
+                _finetuned_models[model_name] = model_path
+            with _mace_lock:
+                _mace_calculators.pop(model_name, None)
             print(f"[finetune] Registered: {model_name} -> {model_path}")
 
             q.put({"type": "done", "modelName": model_name, "modelPath": model_path})
@@ -2286,10 +2455,14 @@ def mace_finetune():
 
             print(f"[finetune] ERROR: {e}")
             traceback.print_exc()
+            if _is_cuda_error(e):
+                _fallback_to_cpu(str(e))
             q.put({"type": "error", "error": str(e)})
         finally:
             if handler:
                 logging.getLogger("mace").removeHandler(handler)
+            _release_compute()
+            _cuda_cleanup()
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -2315,7 +2488,9 @@ def mace_finetune():
 @app.route("/ai/mace/finetune/models", methods=["GET"])
 def list_finetuned_models_endpoint():
     """List all registered fine-tuned models."""
-    return jsonify({"models": _finetuned_models})
+    with _finetune_lock:
+        models = dict(_finetuned_models)
+    return jsonify({"models": models})
 
 
 # ── DFT (PySCF) Endpoints ──────────────────────────────────────────────────
@@ -2329,6 +2504,9 @@ def calculate_dft_energy_endpoint():
 
     if not atoms_data:
         return jsonify({"error": "No atoms provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     try:
         result = compute_dft_energy(
@@ -2347,7 +2525,12 @@ def calculate_dft_energy_endpoint():
 
         print(f"DFT Energy Error: {str(e)}")
         traceback.print_exc()
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
         return jsonify({"error": str(e)}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 @app.route("/ai/dft/energy-batch", methods=["POST"])
@@ -2363,6 +2546,9 @@ def calculate_dft_energy_batch_endpoint():
 
     if not frames_data:
         return jsonify({"error": "No frames provided"}), 400
+
+    if not _acquire_compute():
+        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
 
     basis = data.get("basis", "def2-tzvppd")
     xc = data.get("xc", "wb97m-d3bj")
@@ -2470,7 +2656,12 @@ def calculate_dft_energy_batch_endpoint():
 
         print(f"DFT batch error: {e}")
         traceback.print_exc()
+        if _is_cuda_error(e):
+            _fallback_to_cpu(str(e))
         return jsonify({"error": str(e)}), 500
+    finally:
+        _release_compute()
+        _cuda_cleanup()
 
 
 @app.route("/ai/chart", methods=["POST"])
@@ -2567,13 +2758,15 @@ def generate_chart():
 def clear_history():
     data = request.json or {}
     session_id = data.get("sessionId", "default")
-    if session_id in sessions:
-        del sessions[session_id]  # Fully remove, don't just empty
+    with _sessions_lock:
+        if session_id in sessions:
+            del sessions[session_id]  # Fully remove, don't just empty
     return jsonify({"success": True})
 
 
 # --- Web Search (Tavily API) ---
 _search_cache = {}  # {query_hash: {"result": ..., "time": timestamp}}
+_search_cache_lock = Lock()
 SEARCH_CACHE_TTL = 300  # 5 minutes
 SEARCH_CACHE_MAX = 200
 
@@ -2599,21 +2792,22 @@ def knowledge_search():
         f"{query}:{search_depth}:{max_results}".encode()
     ).hexdigest()
     now = time()
-    if cache_key in _search_cache:
-        cached = _search_cache[cache_key]
-        if now - cached["time"] < SEARCH_CACHE_TTL:
-            print(f"🔍 Search cache hit: {query[:50]}", flush=True)
-            return jsonify(cached["result"])
+    with _search_cache_lock:
+        if cache_key in _search_cache:
+            cached = _search_cache[cache_key]
+            if now - cached["time"] < SEARCH_CACHE_TTL:
+                print(f"🔍 Search cache hit: {query[:50]}", flush=True)
+                return jsonify(cached["result"])
 
-    # Evict expired entries
-    expired = [
-        k for k, v in _search_cache.items() if now - v["time"] > SEARCH_CACHE_TTL
-    ]
-    for k in expired:
-        del _search_cache[k]
-    if len(_search_cache) >= SEARCH_CACHE_MAX:
-        oldest = min(_search_cache, key=lambda k: _search_cache[k]["time"])
-        del _search_cache[oldest]
+        # Evict expired entries
+        expired = [
+            k for k, v in _search_cache.items() if now - v["time"] > SEARCH_CACHE_TTL
+        ]
+        for k in expired:
+            del _search_cache[k]
+        if len(_search_cache) >= SEARCH_CACHE_MAX:
+            oldest = min(_search_cache, key=lambda k: _search_cache[k]["time"])
+            del _search_cache[oldest]
 
     try:
         print(f"🔍 Web search: {query[:80]} (depth={search_depth})", flush=True)
@@ -2650,7 +2844,8 @@ def knowledge_search():
         }
 
         # Cache result
-        _search_cache[cache_key] = {"result": result, "time": now}
+        with _search_cache_lock:
+            _search_cache[cache_key] = {"result": result, "time": now}
         print(f"✅ Search returned {len(result['results'])} results", flush=True)
         return jsonify(result)
 
@@ -3304,7 +3499,6 @@ def evaluate_orbital_batch():
 
 import paramiko
 import stat as stat_module
-from threading import Lock
 
 # Store active SFTP connections per session
 sftp_connections = (
@@ -3602,26 +3796,37 @@ def _scan_finetuned_models():
         # Strip MACE's training suffixes like _run-123_stagetwo
         if "_run-" in name:
             name = name.rsplit("_run-", 1)[0]
-        if name not in _finetuned_models:
-            _finetuned_models[name] = path
-            print(f"  Re-registered fine-tuned model: {name} from {path}")
+        with _finetune_lock:
+            if name not in _finetuned_models:
+                _finetuned_models[name] = path
+                print(f"  Re-registered fine-tuned model: {name} from {path}")
 
 
 def _startup():
     """Run once when the app starts serving (safe for CUDA — runs in worker, not master)."""
-    try:
-        if TORCH_DEVICE == "cuda":
-            print(
-                f"CUDA GPU: {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB"
-            )
-    except Exception as e:
-        print(f"CUDA info unavailable: {e}")
+    global MACE_DEVICE
+    if TORCH_DEVICE == "cuda":
+        try:
+            name = torch.cuda.get_device_name(0)
+            mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+            print(f"CUDA GPU: {name} | Memory: {mem:.1f} GB")
+            # Quick sanity test: can we actually do GPU math?
+            t = torch.randn(64, 64, device="cuda")
+            _ = t @ t
+            del t
+            torch.cuda.empty_cache()
+            print("CUDA tensor test: ✅ passed")
+        except Exception as e:
+            print(f"❌ CUDA test FAILED: {e}")
+            print(f"⚠️ Forcing MACE to CPU — CUDA is not working")
+            MACE_DEVICE = "cpu"
     try:
         get_dft_rks()
     except Exception as e:
         print(f"DFT GPU check failed: {e}")
     warmup_mace()
     _scan_finetuned_models()
+    print(f"✅ Startup complete. MACE device: {MACE_DEVICE}")
 
 
 # Run startup in worker context (gunicorn calls this after fork, flask dev runs it directly)

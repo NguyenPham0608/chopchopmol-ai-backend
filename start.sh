@@ -32,6 +32,6 @@ echo 'source /etc/rp_environment' >> ~/.bashrc 2>/dev/null || true
 echo "Starting ChopChopMol backend on :10000 ..."
 exec gunicorn app:app \
     --workers 1 \
-    --threads 4 \
+    --threads 8 \
     --timeout 600 \
     --bind 0.0.0.0:10000
