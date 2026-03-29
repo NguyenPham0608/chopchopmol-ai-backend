@@ -185,7 +185,12 @@ def get_mace_calculator(model_id="mace-mp-0a"):
             model_url = MACE_MODELS[model_id]["url"]
         else:
             model_url = MACE_MODELS["mace-mp-0a"]["url"]
-        return mace_mp(model=model_url, default_dtype=MACE_DTYPE, device=device, enable_cueq=use_cueq)
+        return mace_mp(
+            model=model_url,
+            default_dtype=MACE_DTYPE,
+            device=device,
+            enable_cueq=use_cueq,
+        )
 
     # Fallback chain: CUDA+cueq → CUDA without cueq → CPU
     try:
@@ -368,6 +373,7 @@ def warmup_mace():
             print(f"  Warmed {model_id} in {time() - t1:.1f}s (device={MACE_DEVICE})")
         except Exception as e:
             import traceback as _tb
+
             print(f"⚠️ MACE warmup failed for {model_id}: {e}")
             _tb.print_exc()
             # If get_potential_energy/get_forces failed (not loading), try CPU fallback
@@ -444,7 +450,9 @@ def get_or_create_molden_cache(molden_content, grid_size, padding):
         # Evict expired or overflow entries
         now = time()
         expired = [
-            k for k, v in molden_cache.items() if now - v["last_access"] > MOLDEN_CACHE_TTL
+            k
+            for k, v in molden_cache.items()
+            if now - v["last_access"] > MOLDEN_CACHE_TTL
         ]
         for k in expired:
             del molden_cache[k]
@@ -726,7 +734,7 @@ TOOLS_JSON = """[
   {"type":"function","function":{"name":"isolate_selection","description":"Isolate selected atoms to view/edit separately.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"undo","description":"Undo last action.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"redo","description":"Redo last undone action.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"execute_python","description":"Execute Python code. Pre-injected variables (use 'x' in dir() to check availability): atoms = list of dicts [{element, x, y, z}, ...] (current frame, Angstrom). positions = numpy float64 array shape (n_frames, n_atoms, 3) in Angstrom — use for vectorized analysis instead of looping over frames. energies = numpy float64 1D array of potential energies in eV, one per frame — plain number array, NOT dicts. frames = list of dicts [{index, atoms: [{element, x, y, z, fx?, fy?, fz?}]}] — only needed for element labels per frame. steps = numpy int array of MD step numbers (only after MD). temperatures = numpy float64 array of temps in K per frame (only after MD). kinetic_energies = numpy float64 array of kinetic energies eV per frame (only after MD). total_energies = numpy float64 array of total energies (pot+kin) eV per frame (only after MD). Libraries: numpy (np), matplotlib (plt), math. Figures auto-captured. Print results to stdout.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}},
+  {"type":"function","function":{"name":"execute_python","description":"Execute Python on the backend server for computation, analysis, and plotting. Use ONLY when you need math/analysis that other tools cannot do. Do NOT use for trivial tasks like printing confirmations. Runs on a remote server — CANNOT access user's local files via open()/os; use read_file tool for file contents instead. Pre-injected variables: atoms = list of dicts [{element, x, y, z}, ...] (current frame, Angstrom). positions = numpy float64 array shape (n_frames, n_atoms, 3) in Angstrom. energies = numpy float64 1D array of potential energies in eV. frames = list of dicts [{index, atoms: [{element, x, y, z, fx?, fy?, fz?}]}]. steps, temperatures, kinetic_energies, total_energies = numpy arrays (only after MD). Libraries: numpy (np), matplotlib (plt), math. Figures auto-captured. Print results to stdout.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute"},"description":{"type":"string","description":"Brief description of what this code does (shown to user for approval)"}},"required":["code"]}}},
   {"type":"function","function":{"name":"finetune_model","description":"Fine-tune a MACE foundation model on the current trajectory frames. Use after generating training data (run_md + calculate_all_dft_energies). Streams epoch-by-epoch loss. Returns model name usable in calculate_energy, optimize_geometry, run_md.","parameters":{"type":"object","properties":{"modelName":{"type":"string","description":"Name for the fine-tuned model (no spaces). E.g. 'caffeine-ft'. Used to reference it in later tools."},"foundationModel":{"type":"string","enum":["mace-mp-0a","mace-mp-0b3","mace-mpa-0"],"description":"Foundation model to fine-tune from."},"epochs":{"type":"integer","description":"Training epochs (default: 100). Use 50-200 for fast fine-tuning."},"batchSize":{"type":"integer","description":"Batch size (default: 4)."},"rMax":{"type":"number","description":"Cutoff radius in Angstroms (default: 4.0)."},"correlation":{"type":"integer","description":"Correlation order (default: 3)."},"validFraction":{"type":"number","description":"Fraction of frames for validation (default: 0.1)."}},"required":["modelName","foundationModel"]}}},
   {"type":"function","function":{"name":"list_finetuned_models","description":"List all fine-tuned MACE models available in this session. Returns model names usable in calculate_energy, optimize_geometry, run_md.","parameters":{"type":"object","properties":{}}}}
 ]"""
@@ -852,7 +860,11 @@ L4 GENERATE: rotational_scan, translation_scan, angle_scan, calculate_energy, ca
 L5 OUTPUT: create_chart, save_file, save_image, create_file, edit_file (present results)
 L6 VIEW: toggle_labels, toggle_force_arrows, toggle_charge_visualization, set_style, camera, undo, redo (non-destructive)
 
-EXECUTE_PYTHON — auto-injected variables (no need to call other tools first):
+EXECUTE_PYTHON — runs Python on the backend server for computation and plotting.
+WHEN TO USE: mathematical analysis, data processing, plotting (matplotlib), statistical calculations, coordinate transformations, custom algorithms. Use it when other tools can't do the job.
+WHEN NOT TO USE: Do NOT use execute_python for trivial tasks like printing a confirmation message, repeating data that's already available, or doing things that other tools handle directly (measuring distances, getting atom info, saving files, etc.). If a dedicated tool exists for the task, use it instead.
+IMPORTANT: execute_python runs on a REMOTE SERVER, not in the user's browser. It CANNOT access the user's local files via open() or os.path. To work with file contents in Python, use read_file first to get the text, then pass that text into your Python code as a string literal. To save results, print them to stdout or create a matplotlib figure — do NOT use open() to write files.
+Auto-injected variables (no need to call other tools first):
 - atoms: list of {{element, x, y, z}} (current frame, Angstrom)
 - positions: numpy (n_frames, n_atoms, 3) — all trajectory coordinates. Use this for vectorized analysis.
 - energies: numpy 1D float array of potential energies (eV), one per frame. Plain numbers, NOT dicts.
@@ -885,6 +897,7 @@ RULES:
 6. Brief responses (1-2 sentences). Execute tools immediately. Minimize tool calls — do as much as possible in a single execute_python call.
 7. Measurement tools accept atom indices directly — no need to select first.
 8. For unknown chemistry facts, use web_search. For known facts, answer directly.
+9. Do NOT use execute_python unless you need actual computation, data analysis, or plotting. Never call it just to print a message, confirm success, or do something a dedicated tool already handles. The user must approve every execute_python call, so don't waste their time.
 
 """
 
@@ -896,7 +909,12 @@ def health():
         try:
             info["gpu"] = torch.cuda.get_device_name(0)
             info["gpu_memory_free_gb"] = round(
-                (torch.cuda.get_device_properties(0).total_mem - torch.cuda.memory_allocated(0)) / 1e9, 1
+                (
+                    torch.cuda.get_device_properties(0).total_mem
+                    - torch.cuda.memory_allocated(0)
+                )
+                / 1e9,
+                1,
             )
         except Exception:
             info["gpu"] = "error"
@@ -1034,7 +1052,9 @@ def chat_stream():
     with _sessions_lock:
         if len(sessions) > MAX_SESSIONS or len(sessions) % 100 == 0:
             expired = [
-                sid for sid, s in sessions.items() if now - s["last_access"] > SESSION_TTL
+                sid
+                for sid, s in sessions.items()
+                if now - s["last_access"] > SESSION_TTL
             ]
             for sid in expired:
                 del sessions[sid]
@@ -1603,10 +1623,20 @@ def _cuda_cleanup():
 def _is_cuda_error(e):
     """Check if an exception is a CUDA/GPU error that warrants fallback to CPU."""
     msg = str(e).lower()
-    return any(x in msg for x in [
-        "cuda", "gpu", "cublas", "cudnn", "nccl", "device-side assert",
-        "illegal memory access", "out of memory", "cuequivariance",
-    ])
+    return any(
+        x in msg
+        for x in [
+            "cuda",
+            "gpu",
+            "cublas",
+            "cudnn",
+            "nccl",
+            "device-side assert",
+            "illegal memory access",
+            "out of memory",
+            "cuequivariance",
+        ]
+    )
 
 
 def _fallback_to_cpu(error_msg=""):
@@ -1646,7 +1676,14 @@ def calculate_energy():
         return jsonify({"error": "No atoms provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -1746,7 +1783,14 @@ def optimize_geometry():
         return jsonify({"error": "No atoms provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -1814,14 +1858,30 @@ def optimize_geometry():
         if include_forces:
             result["forces"] = forces.tolist()
 
-        _set_job(job_id, {"status": "completed", "result": result, "created": time(), "type": "optimize"})
+        _set_job(
+            job_id,
+            {
+                "status": "completed",
+                "result": result,
+                "created": time(),
+                "type": "optimize",
+            },
+        )
         return jsonify(result)
     except Exception as e:
         print(f"❌ MACE Optimization Error: {str(e)}")
         traceback.print_exc()
         if _is_cuda_error(e):
             _fallback_to_cpu(str(e))
-        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "optimize"})
+        _set_job(
+            job_id,
+            {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "optimize",
+            },
+        )
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _release_compute()
@@ -1839,7 +1899,14 @@ def calculate_energy_batch():
         return jsonify({"error": "No frames provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     try:
         model_id = data.get("model", "mace-mp-0a")
@@ -1893,13 +1960,29 @@ def calculate_energy_batch():
             "highestEnergyFrame": max_idx,
             "energyRange_eV": round(max(energies) - min(energies), 6),
         }
-        _set_job(job_id, {"status": "completed", "result": batch_result, "created": time(), "type": "energy-batch"})
+        _set_job(
+            job_id,
+            {
+                "status": "completed",
+                "result": batch_result,
+                "created": time(),
+                "type": "energy-batch",
+            },
+        )
         return jsonify(batch_result)
     except Exception as e:
         print(f"MACE batch error: {e}", flush=True)
         if _is_cuda_error(e):
             _fallback_to_cpu(str(e))
-        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "energy-batch"})
+        _set_job(
+            job_id,
+            {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "energy-batch",
+            },
+        )
         return jsonify({"error": str(e)}), 500
     finally:
         _release_compute()
@@ -1941,7 +2024,14 @@ def run_molecular_dynamics():
         return jsonify({"error": "No atoms provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     try:
         symbols = [a["element"] for a in atoms_data]
@@ -2031,7 +2121,10 @@ def run_molecular_dynamics():
             f"MD complete: {len(trajectory_frames)} frames in {time() - t_start:.1f}s",
             flush=True,
         )
-        _set_job(job_id, {"status": "completed", "result": result, "created": time(), "type": "md"})
+        _set_job(
+            job_id,
+            {"status": "completed", "result": result, "created": time(), "type": "md"},
+        )
         return jsonify(result)
 
     except Exception as e:
@@ -2039,7 +2132,15 @@ def run_molecular_dynamics():
         traceback.print_exc()
         if _is_cuda_error(e):
             _fallback_to_cpu(str(e))
-        _set_job(job_id, {"status": "error", "result": {"error": str(e)}, "created": time(), "type": "md"})
+        _set_job(
+            job_id,
+            {
+                "status": "error",
+                "result": {"error": str(e)},
+                "created": time(),
+                "type": "md",
+            },
+        )
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
     finally:
         _release_compute()
@@ -2084,7 +2185,12 @@ def run_md_stream():
 
     def worker():
         if not _acquire_compute(timeout=60):
-            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            q.put(
+                {
+                    "type": "error",
+                    "error": "Server busy with another computation. Please wait and retry.",
+                }
+            )
             return
         try:
             symbols = [a["element"] for a in atoms_data]
@@ -2204,7 +2310,12 @@ def optimize_geometry_stream():
 
     def worker():
         if not _acquire_compute(timeout=60):
-            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            q.put(
+                {
+                    "type": "error",
+                    "error": "Server busy with another computation. Please wait and retry.",
+                }
+            )
             return
         try:
             symbols = [a["element"] for a in atoms_data]
@@ -2340,7 +2451,12 @@ def mace_finetune():
         import re as _re
 
         if not _acquire_compute(timeout=60):
-            q.put({"type": "error", "error": "Server busy with another computation. Please wait and retry."})
+            q.put(
+                {
+                    "type": "error",
+                    "error": "Server busy with another computation. Please wait and retry.",
+                }
+            )
             return
         handler = None
         try:
@@ -2502,7 +2618,14 @@ def calculate_dft_energy_endpoint():
         return jsonify({"error": "No atoms provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     try:
         result = compute_dft_energy(
@@ -2544,7 +2667,14 @@ def calculate_dft_energy_batch_endpoint():
         return jsonify({"error": "No frames provided"}), 400
 
     if not _acquire_compute():
-        return jsonify({"error": "Server busy with another computation. Please wait and retry."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Server busy with another computation. Please wait and retry."
+                }
+            ),
+            503,
+        )
 
     basis = data.get("basis", "def2-tzvppd")
     xc = data.get("xc", "wb97m-d3bj")
@@ -3806,7 +3936,9 @@ def _startup():
             name = torch.cuda.get_device_name(0)
             mem = torch.cuda.get_device_properties(0).total_mem / 1e9
             cuda_ver = torch.version.cuda or "unknown"
-            print(f"CUDA GPU: {name} | Memory: {mem:.1f} GB | CUDA toolkit: {cuda_ver} | PyTorch: {torch.__version__}")
+            print(
+                f"CUDA GPU: {name} | Memory: {mem:.1f} GB | CUDA toolkit: {cuda_ver} | PyTorch: {torch.__version__}"
+            )
         except Exception as e:
             print(f"CUDA info unavailable: {e}")
     try:
