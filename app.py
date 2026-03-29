@@ -1258,6 +1258,10 @@ def chat_stream():
         while history_slice and history_slice[0].get("role") == "tool":
             history_slice.pop(0)
 
+    # Guarantee at least one user message (Claude API requires non-empty messages)
+    if not history_slice or not any(m.get("role") == "user" for m in history_slice):
+        history_slice.append({"role": "user", "content": user_message or "hello"})
+
     messages = [{"role": "system", "content": systemPrompt}] + history_slice
 
     # Safe token estimation (includes tool_call arguments)
