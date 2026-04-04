@@ -260,6 +260,34 @@ def get_foundation_model_path(model_id):
     return str(path)
 
 
+def _get_float32_foundation_path(model_path):
+    """Pre-convert a MACE foundation model checkpoint from float64 to float32.
+    MACE foundation models ship with float64 weights. TorchScript/fx.GraphModule
+    constants don't auto-convert with --default_dtype=float32, causing dtype
+    mismatch in tensordot. Pre-converting the entire checkpoint ensures all
+    weights, buffers, and graph constants are float32 before training starts.
+    Result is cached on disk — conversion only happens once per model."""
+    fp32_path = model_path + ".fp32"
+    if os.path.exists(fp32_path) and os.path.getmtime(fp32_path) >= os.path.getmtime(model_path):
+        print(f"[finetune] Using cached float32 foundation model: {fp32_path}", flush=True)
+        return fp32_path
+
+    print(f"[finetune] Converting foundation model to float32 (one-time)...", flush=True)
+    model = torch.load(model_path, map_location="cpu", weights_only=False)
+
+    # .float() converts nn.Parameter and nn.Buffer, but misses tensor attributes
+    # stored as constants in torch.fx.GraphModule (e.g. SymmetricContraction graphs)
+    model = model.float()
+    for mod in model.modules():
+        for key, val in list(mod.__dict__.items()):
+            if isinstance(val, torch.Tensor) and val.is_floating_point() and val.dtype != torch.float32:
+                mod.__dict__[key] = val.float()
+
+    torch.save(model, fp32_path)
+    print(f"[finetune] Float32 conversion done: {fp32_path}", flush=True)
+    return fp32_path
+
+
 def compute_dft_energy(
     atoms_data,
     basis="def2-tzvp",
@@ -2548,6 +2576,9 @@ def mace_finetune():
                     except OSError:
                         pass
 
+            # Pre-convert foundation model from float64 to float32 (cached on disk)
+            fp32_foundation = _get_float32_foundation_path(foundation_path)
+
             # Build CLI args for MACE training
             argv = [
                 f"--name={model_name}",
@@ -2567,7 +2598,7 @@ def mace_finetune():
                 "--amsgrad",
                 f"--device={MACE_DEVICE}",
                 "--default_dtype=float32",
-                f"--foundation_model={foundation_path}",
+                f"--foundation_model={fp32_foundation}",
                 f"--correlation={correlation}",
                 f"--patience={data.get('patience', 20)}",
                 "--seed=42",
