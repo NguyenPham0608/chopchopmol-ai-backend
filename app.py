@@ -43,6 +43,12 @@ TORCH_DEVICE = get_torch_device()
 MACE_DEVICE = "cpu" if TORCH_DEVICE == "mps" else TORCH_DEVICE
 MACE_DTYPE = "float32"
 
+# Track whether CUDA was available at startup so we can recover after transient failures
+# instead of permanently falling back to CPU for the rest of the server's lifetime.
+_cuda_was_available = TORCH_DEVICE == "cuda"
+_cuda_fallback_time = 0.0  # timestamp of last fallback
+_CUDA_RECOVERY_COOLDOWN = 30  # seconds between recovery attempts
+
 # DFT (PySCF) constants and GPU detection
 HARTREE_TO_EV = 27.211386245988
 BOHR_TO_ANG = 0.529177210903
@@ -1652,9 +1658,11 @@ def chat_stream():
 
 
 def _cuda_cleanup():
-    """Free cached GPU memory after heavy computations."""
+    """Free cached GPU memory after heavy computations.
+    Synchronizes first to ensure all GPU ops are complete before freeing memory."""
     if torch.cuda.is_available():
         try:
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
         except Exception:
             pass
@@ -1680,15 +1688,40 @@ def _is_cuda_error(e):
 
 
 def _fallback_to_cpu(error_msg=""):
-    """Switch MACE to CPU after a CUDA failure. Clears broken GPU calculators."""
-    global MACE_DEVICE
+    """Temporarily switch MACE to CPU after a CUDA failure. Clears broken GPU calculators.
+    CUDA will be retried automatically after _CUDA_RECOVERY_COOLDOWN seconds."""
+    global MACE_DEVICE, _cuda_fallback_time
     if MACE_DEVICE == "cpu":
         return
-    print(f"⚠️ CUDA failure, switching MACE to CPU. Error: {error_msg}", flush=True)
+    print(f"⚠️ CUDA failure, temporarily switching MACE to CPU. Error: {error_msg}", flush=True)
     MACE_DEVICE = "cpu"
+    _cuda_fallback_time = time()
     with _mace_lock:
         _mace_calculators.clear()
     _cuda_cleanup()
+
+
+def _try_recover_cuda():
+    """If CUDA was available at startup but we fell back to CPU, try to recover.
+    Called before each compute operation. Respects cooldown to avoid spam."""
+    global MACE_DEVICE, _cuda_fallback_time
+    if not _cuda_was_available or MACE_DEVICE != "cpu":
+        return  # Never had CUDA, or already on CUDA — nothing to do
+    now = time()
+    if now - _cuda_fallback_time < _CUDA_RECOVERY_COOLDOWN:
+        return  # Too soon to retry
+    try:
+        torch.cuda.synchronize()
+        t = torch.zeros(1, device="cuda")
+        del t
+        torch.cuda.empty_cache()
+        MACE_DEVICE = "cuda"
+        with _mace_lock:
+            _mace_calculators.clear()  # Force reload on CUDA
+        print(f"✅ CUDA recovered! Switching MACE back to GPU.", flush=True)
+    except Exception as e:
+        _cuda_fallback_time = now  # Reset cooldown
+        print(f"⚠️ CUDA recovery failed, staying on CPU: {e}", flush=True)
 
 
 # How long a new compute request will wait for the semaphore before returning 503
@@ -1696,7 +1729,9 @@ _COMPUTE_QUEUE_TIMEOUT = 30  # seconds
 
 
 def _acquire_compute(timeout=_COMPUTE_QUEUE_TIMEOUT):
-    """Try to acquire the compute semaphore. Returns True if acquired, False if timed out."""
+    """Try to acquire the compute semaphore. Returns True if acquired, False if timed out.
+    Also attempts CUDA recovery if we previously fell back to CPU."""
+    _try_recover_cuda()
     return _compute_semaphore.acquire(timeout=timeout)
 
 
@@ -1726,6 +1761,7 @@ def calculate_energy():
         )
 
     try:
+        t0 = time()
         symbols = [a["element"] for a in atoms_data]
         positions = [[a["x"], a["y"], a["z"]] for a in atoms_data]
 
@@ -1738,6 +1774,7 @@ def calculate_energy():
             "success": True,
             "energy_eV": energy,
             "energy_kcal": energy * 23.0609,  # eV to kcal/mol
+            "device": MACE_DEVICE,
         }
 
         if include_forces:
@@ -1745,6 +1782,7 @@ def calculate_energy():
             result["forces"] = forces
             result["max_force"] = float(np.max(np.linalg.norm(forces, axis=1)))
 
+        print(f"MACE energy: {len(atoms_data)} atoms, model={model_id}, device={MACE_DEVICE}, {time()-t0:.2f}s", flush=True)
         return jsonify(result)
     except Exception as e:
         if _is_cuda_error(e):
@@ -2394,6 +2432,7 @@ def optimize_geometry_stream():
 
             forces = atoms.get_forces()
             max_force = float(np.max(np.linalg.norm(forces, axis=1)))
+            final_energy = float(atoms.get_potential_energy())
             q.put(
                 {
                     "type": "done",
@@ -2401,8 +2440,8 @@ def optimize_geometry_stream():
                         "success": True,
                         "converged": bool(max_force < fmax),
                         "steps": int(opt.nsteps),
-                        "energy_eV": float(atoms.get_potential_energy()),
-                        "energy_kcal": float(atoms.get_potential_energy()) * 23.0609,
+                        "energy_eV": final_energy,
+                        "energy_kcal": final_energy * 23.0609,
                         "max_force": max_force,
                         "frameCount": frame_index[0],
                     },
@@ -2480,7 +2519,8 @@ def mace_finetune():
         1 if extxyz.startswith("3\n") or extxyz.startswith("2\n") else 0
     )
     print(
-        f"[finetune] Request: model={model_name}, foundation={foundation_model_id}, epochs={epochs}, ~{frame_count} frames"
+        f"[finetune] Request: model={model_name}, foundation={foundation_model_id}, "
+        f"epochs={epochs}, ~{frame_count} frames, device={MACE_DEVICE}, dtype=float32"
     )
 
     q = queue.Queue()
@@ -2526,9 +2566,10 @@ def mace_finetune():
                 "--ema_decay=0.99",
                 "--amsgrad",
                 f"--device={MACE_DEVICE}",
-                "--default_dtype=float64",
+                "--default_dtype=float32",
                 f"--foundation_model={foundation_path}",
                 f"--correlation={correlation}",
+                f"--patience={data.get('patience', 20)}",
                 "--seed=42",
                 f"--checkpoints_dir={FINETUNE_DIR}",
                 f"--results_dir={FINETUNE_DIR}",
@@ -2577,7 +2618,7 @@ def mace_finetune():
             args = parser.parse_args(argv)
 
             # Run training in-process (avoids CUDA fork/subprocess segfaults)
-            print(f"[finetune] Training started on {MACE_DEVICE}...")
+            print(f"[finetune] Training started on {MACE_DEVICE} (dtype=float32, patience={data.get('patience', 20)})...")
             mace_run(args)
             print(f"[finetune] Training completed")
 
