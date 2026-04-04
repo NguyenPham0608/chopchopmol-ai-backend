@@ -3,6 +3,16 @@ from flask_cors import CORS
 from openai import OpenAI
 from anthropic import Anthropic
 import os
+
+# Prevent OpenMP/MKL deadlocks under gunicorn threaded workers.
+# PySCF (libcint, libxc) and numpy use OpenMP internally — multiple OpenMP
+# thread pools fighting Python threads cause random freezes.
+# Must be set BEFORE any numpy/torch/pyscf import.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import json
 import orjson
 import tempfile
@@ -65,8 +75,11 @@ def _patch_pyscf_dispersion():
         mod = types.ModuleType("pyscf.dispersion.dftd3")
         mod.DFTD3Dispersion = DFTD3Dispersion
         sys.modules["pyscf.dispersion.dftd3"] = mod
+        print("Dispersion: dftd3 standalone bridge OK")
     except ImportError:
-        pass
+        print("⚠️ dftd3 not available — D3-corrected functionals (wb97m-d3bj etc.) will fail")
+    except Exception as e:
+        print(f"⚠️ dftd3 bridge failed: {e}")
 
     try:
         from dftd4.pyscf import DFTD4Dispersion as _StandaloneD4
@@ -87,8 +100,11 @@ def _patch_pyscf_dispersion():
         mod = types.ModuleType("pyscf.dispersion.dftd4")
         mod.DFTD4Dispersion = DFTD4Dispersion
         sys.modules["pyscf.dispersion.dftd4"] = mod
+        print("Dispersion: dftd4 standalone bridge OK")
     except ImportError:
-        pass
+        print("⚠️ dftd4 not available — D4-corrected functionals will fail")
+    except Exception as e:
+        print(f"⚠️ dftd4 bridge failed: {e}")
 
 
 _patch_pyscf_dispersion()
@@ -240,14 +256,21 @@ def get_foundation_model_path(model_id):
 
 def compute_dft_energy(
     atoms_data,
-    basis="def2-tzvppd",
+    basis="def2-tzvp",
     xc="wb97m-d3bj",
     charge=0,
     spin=0,
     include_forces=True,
-    conv_tol=1e-10,
+    conv_tol=1e-8,
 ):
-    """Single-point DFT energy + forces using PySCF. GPU-accelerated when available."""
+    """Single-point DFT energy + forces using PySCF. GPU-accelerated when available.
+
+    Defaults tuned for web-API speed:
+      - def2-tzvp (no diffuse): ~3-5x faster than def2-tzvppd, excellent for neutral molecules
+      - conv_tol=1e-8: still very accurate, converges in fewer SCF cycles
+      - (75, 302) grid: good accuracy, ~2x fewer points than (99, 590)
+    Callers can still pass def2-tzvppd / 1e-10 for publication-quality results.
+    """
     import pyscf
 
     atom_list = [(a["element"], (a["x"], a["y"], a["z"])) for a in atoms_data]
@@ -262,13 +285,26 @@ def compute_dft_energy(
         mf = cpu_rks.RKS(mol, xc=xc).density_fit()
 
     mf.conv_tol = conv_tol
-    mf.grids.atom_grid = (99, 590)
+    mf.max_cycle = 200  # prevent infinite SCF hang (default 50 is too low for some systems)
+    mf.grids.atom_grid = (75, 302)
+
     energy_hartree = mf.kernel()
+
+    # If SCF didn't converge, retry with looser settings + DIIS damping
+    if not mf.converged:
+        print(f"⚠️ SCF not converged, retrying with damping...", flush=True)
+        mf.damp = 0.5
+        mf.max_cycle = 300
+        mf.conv_tol = max(conv_tol, 1e-7)
+        energy_hartree = mf.kernel(dm0=mf.make_rdm1())
+        if not mf.converged:
+            print(f"⚠️ SCF still not converged after retry", flush=True)
 
     result = {
         "energy_hartree": float(energy_hartree),
         "energy_eV": float(energy_hartree * HARTREE_TO_EV),
         "energy_kcal": float(energy_hartree * HARTREE_TO_EV * 23.0609),
+        "converged": bool(mf.converged),
         "basis": basis,
         "xc": xc,
         "charge": charge,
@@ -2634,12 +2670,12 @@ def calculate_dft_energy_endpoint():
     try:
         result = compute_dft_energy(
             atoms_data,
-            basis=data.get("basis", "def2-tzvppd"),
+            basis=data.get("basis", "def2-tzvp"),
             xc=data.get("xc", "wb97m-d3bj"),
             charge=data.get("charge", 0),
             spin=data.get("spin", 0),
             include_forces=data.get("includeForces", True),
-            conv_tol=data.get("conv_tol", 1e-10),
+            conv_tol=data.get("conv_tol", 1e-8),
         )
         result["success"] = True
         return jsonify(result)
@@ -2680,12 +2716,12 @@ def calculate_dft_energy_batch_endpoint():
             503,
         )
 
-    basis = data.get("basis", "def2-tzvppd")
+    basis = data.get("basis", "def2-tzvp")
     xc = data.get("xc", "wb97m-d3bj")
     charge = data.get("charge", 0)
     spin = data.get("spin", 0)
     include_forces = data.get("includeForces", True)
-    conv_tol = data.get("conv_tol", 1e-10)
+    conv_tol = data.get("conv_tol", 1e-8)
 
     try:
         from time import time as _t
@@ -2725,13 +2761,22 @@ def calculate_dft_energy_batch_endpoint():
 
             mf = rks_mod.RKS(mol, xc=xc).density_fit()
             mf.conv_tol = conv_tol
-            mf.grids.atom_grid = (99, 590)
+            mf.max_cycle = 200
+            mf.grids.atom_grid = (75, 302)
 
             # Warm-start SCF from previous frame's density matrix (same molecule only)
             if prev_dm is not None:
                 mf.kernel(dm0=prev_dm)
             else:
                 mf.kernel()
+
+            # Retry with damping if SCF didn't converge
+            if not mf.converged:
+                print(f"  ⚠️ Frame {i} SCF not converged, retrying with damping...", flush=True)
+                mf.damp = 0.5
+                mf.max_cycle = 300
+                mf.conv_tol = max(conv_tol, 1e-7)
+                mf.kernel(dm0=mf.make_rdm1())
 
             prev_dm = mf.make_rdm1()
 

@@ -29,12 +29,21 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # Install cupy for gpu4pyscf GPU acceleration
 RUN pip install --no-cache-dir cupy-cuda12x
 
-# Install remaining requirements, SKIP torch so we keep the CUDA version
+# Install remaining requirements, SKIP torch so we keep the CUDA version.
+# Use --extra-index-url so any transitive torch deps also resolve to CUDA builds.
+# Use --no-deps for mace-torch to prevent it pulling CPU torch from PyPI.
 COPY requirements.txt .
-RUN grep -vi '^torch$' requirements.txt | pip install --no-cache-dir -r /dev/stdin
+RUN grep -viE '^torch$' requirements.txt \
+    | pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu124 \
+        -r /dev/stdin
 
-# Verify CUDA torch was not overwritten by CPU version
-RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA support: {torch.version.cuda}')"
+# Verify CUDA torch was NOT overwritten by CPU version (fail the build if so)
+RUN python -c "\
+import torch; \
+assert torch.version.cuda is not None, \
+    f'CUDA torch was overwritten! Got torch {torch.__version__} with cuda={torch.version.cuda}'; \
+print(f'✅ PyTorch {torch.__version__}, CUDA: {torch.version.cuda}')"
 
 # Verify cuequivariance CUDA kernels are importable
 RUN python -c "import cuequivariance as cue; print(f'cuequivariance {cue.__version__}'); import cuequivariance_torch; print('cuequivariance-torch OK')" || echo "WARNING: cuequivariance import failed — MACE will use PyTorch fallback"
